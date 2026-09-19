@@ -1,0 +1,208 @@
+# ============================================================================
+# OpenWrt 24.10 — HiWiFi C526A (极路由X) 旁路由配置
+#
+# 目标 1：kernel 6.6 + ipqess（替换有缺陷的 essedma，治反复重启）
+# 目标 2：内置 PassWall v1 + PassWall v2（含 SSR-plus 能力），开箱即用
+#
+# 说明：
+#   - 本文件只写"确定要改的项"，其余交给 make defconfig 自动补全。
+#   - 不要手工写 CONFIG_PACKAGE_x=n，容易和依赖冲突。
+#   - PassWall 不在官方 feed，需要额外 feed（见 build.yml 的 feeds 步骤）：
+#       src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main
+#       src-git passwall_luci     https://github.com/Openwrt-Passwall/openwrt-passwall.git;main
+#       src-git passwall2         https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main
+#     且必须先删掉官方 feed 里版本冲突的代理包。
+# ============================================================================
+
+# ---------- Target ----------
+CONFIG_TARGET_ipq40xx=y
+CONFIG_TARGET_ipq40xx_generic=y
+CONFIG_TARGET_ipq40xx_generic_DEVICE_hiwifi_c526a=y
+
+# ---------- 调试符号（关掉省空间，但保留 kallsyms 便于崩溃时看栈） ----------
+CONFIG_KERNEL_KALLSYMS=y
+CONFIG_KERNEL_DEBUG_INFO=n
+CONFIG_KERNEL_DEBUG_INFO_BTF=n
+
+# ---------- 板级 WiFi BDF（DEVICE_PACKAGES 已引用，必须存在） ----------
+CONFIG_PACKAGE_ipq-wifi-hiwifi_c526a=y
+
+# ---------- 旁路由核心：LuCI + 中文 ----------
+CONFIG_PACKAGE_luci=y
+CONFIG_PACKAGE_luci-app-firewall=y
+CONFIG_PACKAGE_luci-app-opkg=y
+CONFIG_PACKAGE_luci-theme-bootstrap=y
+CONFIG_PACKAGE_luci-i18n-base-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-firewall-zh-cn=y
+CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y
+
+# ============================================================================
+# 科学上网 = PassWall v1 + PassWall v2（两套都编，互补）
+#   为什么两套都要：
+#     - PassWall v1：多内核可选，SSR 支持完整（ssr-redir / ssr-local）
+#     - PassWall v2：默认 sing-box 后端，新协议（Hy2 / TUIC / AnyTLS）快
+#   注意：两者会抢 DNS 入口和透明代理端口，运行时只启用其中一套。
+# ============================================================================
+
+# ---------- PassWall v1（含 SSR-plus） ----------
+CONFIG_PACKAGE_luci-app-passwall=y
+CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
+
+# 基础内核：Xray + Sing-Box 都要
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata=y
+
+# ★ SSR 支持（这是"ssr+"的核心）
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Client=y
+
+# 插件类（obfs 保留；v2ray-plugin / xray-plugin 编译昂贵，关）
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Simple_Obfs=y
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin=n
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin=n
+# shadowsocks-rust 是 Rust 编译，最慢；SS 已由 ssr-libev+sing-box+xray 覆盖
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client=n
+
+# Shadow-TLS / Hysteria / NaiveProxy（编译昂贵，按需再开）
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadow_TLS=n
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria=n
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy=n
+
+# 透明代理：24.10 默认 firewall4(nftables)，必须选 Nftables 版
+CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy=y
+CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y
+
+# ---------- PassWall v2 ----------
+CONFIG_PACKAGE_luci-app-passwall2=y
+CONFIG_PACKAGE_luci-i18n-passwall2-zh-cn=y
+
+# 基础内核：arm(armv7) 不在 _Basic_Core_All 的 default 里，必须显式指定
+CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_Xray=y
+CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_SingBox=y
+
+# 透明代理同上
+CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy=y
+CONFIG_PACKAGE_luci-app-passwall2_Nftables_Transparent_Proxy=y
+
+# 客户端与插件（与 v1 保持同样的取舍：只留 SSR + obfs）
+CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_ShadowsocksR_Libev_Client=y
+CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Simple_Obfs=y
+CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadowsocks_Rust_Client=n
+CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_V2ray_Plugin=n
+# haproxy 是负载均衡用，Go/原生编译且非必需 → 关
+CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy=n
+
+# ---------- 代理核心与依赖（显式钉住，避免漏包） ----------
+#
+# ⚠️ 编译负担说明（GitHub Actions 免费 runner 只有 2 核 / 7GB）：
+#    下列包是"源码构建"，不是下载二进制，编译耗时差异巨大：
+#      sing-box / xray-core / hysteria / v2ray-plugin / xray-plugin  → Go，各需完整下载+编译依赖树
+#      shadowsocks-rust                                              → Rust，最慢
+#    实测经验：全量编译 + 5 个 Go 包 + 1 个 Rust 包，350 分钟大概率超时。
+#    → 因此只保留"能力不可替代"的包，砍掉重复功能项（见下方注释）。
+CONFIG_PACKAGE_xray-core=y
+CONFIG_PACKAGE_sing-box=y
+CONFIG_PACKAGE_chinadns-ng=y
+CONFIG_PACKAGE_dns2socks=y
+CONFIG_PACKAGE_microsocks=y
+CONFIG_PACKAGE_ipt2socks=y
+
+# ★ SSR 核心（"ssr+" 的关键，不可省）
+CONFIG_PACKAGE_shadowsocksr-libev-ssr-local=y
+CONFIG_PACKAGE_shadowsocksr-libev-ssr-redir=y
+
+# ★ Shadowsocks 加密插件（obfs 是 SS 常用搭配，体积小、编译快，保留）
+CONFIG_PACKAGE_simple-obfs-client=y
+
+# ——— 以下为"能力重复"或"编译昂贵"项，按需取舍 ———
+# shadowsocks-rust：Rust 编译，最慢。SS 功能已由 ssr-libev + sing-box + xray 覆盖 → 关
+CONFIG_PACKAGE_shadowsocks-rust-sslocal=n
+# hysteria：Go 编译。Hy2 已可由 sing-box 提供 → 关
+CONFIG_PACKAGE_hysteria=n
+# v2ray-plugin / xray-plugin：都是 SIP003 的 SS 插件，obfs 已够用 → 关
+CONFIG_PACKAGE_v2ray-plugin=n
+CONFIG_PACKAGE_xray-plugin=n
+# shadow-tls：Go 编译，特殊场景才用 → 关
+CONFIG_PACKAGE_shadow-tls=n
+
+# 体积小、非编译负担，保留
+CONFIG_PACKAGE_geoview=y
+CONFIG_PACKAGE_v2ray-geoip=y
+CONFIG_PACKAGE_v2ray-geosite=y
+CONFIG_PACKAGE_tcping=y
+CONFIG_PACKAGE_lyaml=y
+
+# ---------- DNS / 分流必需 ----------
+CONFIG_PACKAGE_dnsmasq-full=y
+CONFIG_PACKAGE_ipset=y
+CONFIG_PACKAGE_ip-full=y
+
+# nftables 透明代理栈（24.10 主用）
+CONFIG_PACKAGE_nftables=y
+CONFIG_PACKAGE_kmod-nft-socket=y
+CONFIG_PACKAGE_kmod-nft-tproxy=y
+CONFIG_PACKAGE_kmod-nft-nat=y
+CONFIG_PACKAGE_kmod-nf-reject=y
+CONFIG_PACKAGE_kmod-nf-reject6=y
+
+# iptables 兼容栈（部分旧脚本/规则仍依赖，保留可切）
+CONFIG_PACKAGE_iptables=y
+CONFIG_PACKAGE_iptables-zz-legacy=y
+CONFIG_PACKAGE_kmod-ipt-nat=y
+CONFIG_PACKAGE_iptables-mod-conntrack-extra=y
+CONFIG_PACKAGE_iptables-mod-iprange=y
+CONFIG_PACKAGE_iptables-mod-socket=y
+CONFIG_PACKAGE_iptables-mod-tproxy=y
+
+# ---------- IPv6（旁路由要给内网发 RA / 处理 v6 流量） ----------
+CONFIG_PACKAGE_ipv6helper=y
+CONFIG_PACKAGE_odhcp6c=y
+CONFIG_PACKAGE_odhcpd-ipv6only=y
+CONFIG_PACKAGE_kmod-ip6tables=y
+CONFIG_PACKAGE_ip6tables=y
+CONFIG_PACKAGE_ip6tables-extra=y
+CONFIG_PACKAGE_luci-proto-ipv6=y
+
+# ---------- 常用工具 ----------
+CONFIG_PACKAGE_curl=y
+CONFIG_PACKAGE_wget-ssl=y
+CONFIG_PACKAGE_unzip=y
+CONFIG_PACKAGE_coreutils=y
+CONFIG_PACKAGE_coreutils-base64=y
+CONFIG_PACKAGE_coreutils-nohup=y
+CONFIG_PACKAGE_coreutils-timeout=y
+CONFIG_PACKAGE_openssh-sftp-server=y
+CONFIG_PACKAGE_htop=y
+CONFIG_PACKAGE_nano=y
+CONFIG_PACKAGE_ca-bundle=y
+CONFIG_PACKAGE_resolveip=y
+CONFIG_PACKAGE_zoneinfo-asia=y
+CONFIG_PACKAGE_tzdata-asia=y
+
+# ---------- 广告屏蔽（与现役固件功能对齐） ----------
+CONFIG_PACKAGE_luci-app-adblock-fast=y
+
+# ---------- NAND / UBI 维护工具（刷机前备份用得上） ----------
+CONFIG_PACKAGE_kmod-mtd-rw=y
+CONFIG_PACKAGE_mtd-utils=y
+CONFIG_PACKAGE_ubi-utils=y
+CONFIG_PACKAGE_uboot-envtools=y
+
+# ---------- 系统监控 ----------
+CONFIG_PACKAGE_luci-app-commands=y
+
+# ---------- Wi-Fi 全关（旁路由只走有线，与已执行的驱动卸载实验一致） ----------
+# 不显式写 =n，让 defconfig 按 target 默认走。
+
+# ---------- 版本标识（方便刷完在系统页核对） ----------
+CONFIG_VERSIONOPT=y
+CONFIG_VERSION_DIST="OpenWrt-C526A"
+CONFIG_VERSION_NUMBER="24.10-ipqess-passwall"
+CONFIG_VERSION_MANUFACTURER="HiWiFi"
+CONFIG_VERSION_PRODUCT="C526A"
+
+# ---------- 构建 ----------
+CONFIG_CCACHE=y
+CONFIG_AUTOREMOVE=n
+CONFIG_DEBUG=n

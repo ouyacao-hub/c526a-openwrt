@@ -186,45 +186,78 @@ jobs:
           echo "=== 第一轮 defconfig（解析 select 依赖）==="
           make defconfig
           echo "第一轮 OK, exit=$?"
-          # 第二轮：强制应用我们的 =n（PassWall 的 INCLUDE_xxx 是 select 关系，
-          #         光靠 .config 里的 =n 可能被 select 拉回来，必须再覆盖一次）
-          echo "=== 强制关闭编译昂贵的包 ==="
+
+          # ================================================================
+          # ★★★ 关键：PassWall 的 INCLUDE_xxx 是 config 层面的【select】关系。
+          #    实测 `./scripts/config --set-val <opt> n` 和 `--unset` 都压不住
+          #    随后的 `make defconfig` —— 它会把 INCLUDE_Haproxy/INCLUDE_Geoview
+          #    重新拉回 =y（Run #6 就是这样又炸的）。
+          #
+          #    唯一可靠做法：在**最后一次** defconfig 之后，用 sed 直接改 .config，
+          #    改完不再跑 defconfig。
+          #
+          #    ★ 教训：v1(passwall) 和 v2(passwall2) 各有独立的 INCLUDE_*，
+          #      漏掉任何一套都会被拉回来（Run #6 漏的就是 passwall_INCLUDE_Haproxy）。
+          # ================================================================
+          echo "=== 第三轮 defconfig（先收敛）==="
+          make defconfig
+
+          echo "=== ★ 收尾：sed 直接把要关的项写死为 n（之后不再 defconfig）==="
           for opt in \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Server \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadow_TLS \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadowsocks_Rust_Client \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadowsocks_Rust_Server \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_V2ray_Plugin \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Xray_Plugin \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Geoview \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Hysteria \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_NaiveProxy \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadow_TLS \
             CONFIG_PACKAGE_shadowsocks-rust-sslocal \
+            CONFIG_PACKAGE_shadowsocks-rust-ssserver \
             CONFIG_PACKAGE_hysteria \
             CONFIG_PACKAGE_v2ray-plugin \
             CONFIG_PACKAGE_xray-plugin \
             CONFIG_PACKAGE_shadow-tls \
             CONFIG_PACKAGE_geoview \
-            CONFIG_PACKAGE_haproxy ; do
-            ./scripts/config --set-val "$opt" n 2>/dev/null || true
-            ./scripts/config --unset "$opt" 2>/dev/null || true
+            CONFIG_PACKAGE_haproxy \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Server \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy ; do
+            if grep -q "^${opt}=" .config; then
+              sed -i "s|^${opt}=.*|# ${opt} is not set|" .config
+            else
+              printf '# %s is not set\n' "$opt" >> .config
+            fi
           done
-          echo "=== 第三轮 defconfig（重新收敛）==="
-          make defconfig
-          echo "=== 收敛后复查（应全为 n 或不存在）==="
+          echo "=== ★ 收尾复查（全部必须 not set / 未定义）==="
+          BAD=0
           for opt in \
-            CONFIG_PACKAGE_shadowsocks-rust-sslocal \
-            CONFIG_PACKAGE_hysteria \
-            CONFIG_PACKAGE_v2ray-plugin \
-            CONFIG_PACKAGE_xray-plugin \
-            CONFIG_PACKAGE_shadow-tls \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Geoview \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy \
             CONFIG_PACKAGE_geoview \
             CONFIG_PACKAGE_haproxy ; do
-            got=$(grep -E "^${opt}=" .config || echo "${opt}  (未定义)")
+            got=$(grep -E "^${opt}=" .config || echo "  ${opt}  (未定义)")
             echo "  $got"
+            case "$got" in
+              *"=y"*) echo "     !! 仍为 y"; BAD=1 ;;
+            esac
           done
+          if [ "$BAD" -ne 0 ]; then
+            echo "!! 收尾失败：仍有项被 select 拉回 y"
+            exit 1
+          fi
+          echo "OK: geoview / haproxy 已全部关闭"
           echo "=== .config 是否生成成功 ==="
           ls -la .config && wc -l .config
 
@@ -309,7 +342,6 @@ jobs:
           done
           echo ""
           echo "=== ★★ 必须为 n 的包（含 geoview，Go 版本不兼容）★★ ==="
-          FAIL_GEOVIEW=0
           for p in shadowsocks-rust-sslocal hysteria v2ray-plugin xray-plugin \
                    shadow-tls haproxy geoview; do
             v=$(grep -E "^CONFIG_PACKAGE_${p}=" .config 2>/dev/null | cut -d= -f2 || true)
@@ -318,7 +350,27 @@ jobs:
             if [ "$v" = "y" ]; then
               echo "     !! 必须为 n / 未定义，否则编译会失败"
               FAIL=1
-              [ "$p" = "geoview" ] && FAIL_GEOVIEW=1
+            fi
+          done
+          echo ""
+          echo "=== ★★ PassWall v1/v2 的 INCLUDE_* 必须全关（select 关系，易被拉回）★★ ==="
+          for opt in \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadow_TLS \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Geoview \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Hysteria \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadowsocks_Rust_Client ; do
+            v=$(grep -E "^${opt}=" .config 2>/dev/null | cut -d= -f2 || true)
+            v=${v:-未定义}
+            echo "  $(echo "$opt" | sed 's/^CONFIG_PACKAGE_luci-app-//') = ${v}"
+            if [ "$v" = "y" ]; then
+              echo "     !! 必须为 n —— 会把对应包拉进编译"
+              FAIL=1
             fi
           done
           # geoview 源码目录也必须真的没了

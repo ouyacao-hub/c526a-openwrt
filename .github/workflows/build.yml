@@ -1,0 +1,253 @@
+# ============================================================================
+# HiWiFi C526A (极路由X) — OpenWrt 24.10 + ipqess + PassWall 自编译
+#
+# 两个关键点：
+#  1) REPO_BRANCH 钉死为 openwrt-24.10（不是 master！）
+#     keli 原版模板用 REPO_BRANCH: master，每次跑都 clone 当时的 master，
+#     → 同一仓库不同时间编出的固件内核完全不同。这就是"不同固件行为不同"的根源。
+#  2) PassWall 不在官方 feed，必须加第三方 feed，并且要先删掉官方 feed 里
+#     版本冲突的代理包（否则编译报重复定义 / 运行异常）。
+#
+# 用法：把本文件放到仓库 .github/workflows/build.yml
+#       然后 Actions → Build C526A → Run workflow
+# ============================================================================
+
+name: Build C526A (OpenWrt 24.10 + ipqess + PassWall)
+
+on:
+  workflow_dispatch:
+  # 也允许定时（可选，注释掉避免误触发）
+  # schedule:
+  #   - cron: '0 18 * * 0'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /usr/local/share/boost "$AGENT_TOOLSDIRECTORY"
+          sudo apt-get clean
+          df -h /
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget ccache \
+            libelf-dev python3-pyelftools
+
+      - name: Clone OpenWrt (openwrt-24.10, PINNED)
+        run: |
+          # ★★★ 分支钉死，不用 master ★★★
+          git clone --depth 1 --branch openwrt-24.10 \
+            https://github.com/openwrt/openwrt.git openwrt
+          cd openwrt
+          git log --oneline -1
+          grep -E '^LINUX_VERSION-' include/kernel-version.mk || true
+
+      - name: Apply C526A patch
+        run: |
+          cd openwrt
+          git config user.email "build@c526a.local"
+          git config user.name "C526A Build"
+          # 我方移植好的 24.10 版补丁
+          git am --3way "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-24.10.patch" \
+            || (echo "=== git am 失败，尝试 apply ==="; \
+                git am --abort 2>/dev/null || true; \
+                git apply --3way "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-24.10.patch")
+          git log --oneline -3
+
+      # ★★★ 加入 PassWall 第三方 feed ★★★
+      # 注意：这里必须用 printf 逐行追加，不能用 heredoc。
+      # 因为 YAML 块标量 (run: |) 会给每一行加上 10 个空格缩进，
+      # heredoc 的结束标记 EOF 也会被缩进，导致 shell 无法识别、内容写错。
+      - name: Add PassWall feeds
+        run: |
+          cd openwrt
+          printf '%s\n' \
+            'src-git passwall_packages https://github.com/Openwrt-Passwall/openwrt-passwall-packages.git;main' \
+            'src-git passwall_luci https://github.com/Openwrt-Passwall/openwrt-passwall.git;main' \
+            'src-git passwall2_luci https://github.com/Openwrt-Passwall/openwrt-passwall2.git;main' \
+            >> feeds.conf.default
+          echo "=== feeds.conf.default ==="
+          cat -A feeds.conf.default
+
+      - name: Update feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          # 先安装官方 feed
+          ./scripts/feeds install -a
+
+      - name: Remove conflicting official proxy packages
+        run: |
+          cd openwrt
+          # PassWall README 明确要求：官方 feed 自带的这些包版本与 passwall 预期不一致，
+          # 不删会导致编译冲突或运行异常。
+          rm -rf feeds/packages/net/xray-core \
+                 feeds/packages/net/v2ray-geodata \
+                 feeds/packages/net/sing-box \
+                 feeds/packages/net/chinadns-ng \
+                 feeds/packages/net/dns2socks \
+                 feeds/packages/net/hysteria \
+                 feeds/packages/net/ipt2socks \
+                 feeds/packages/net/microsocks \
+                 feeds/packages/net/naiveproxy \
+                 feeds/packages/net/shadowsocks-rust \
+                 feeds/packages/net/shadowsocksr-libev \
+                 feeds/packages/net/simple-obfs \
+                 feeds/packages/net/tcping \
+                 feeds/packages/net/tuic-client \
+                 feeds/packages/net/v2ray-plugin \
+                 feeds/packages/net/xray-plugin \
+                 feeds/packages/net/geoview \
+                 feeds/packages/net/shadow-tls
+          # 官方 luci 里过时的 passwall 版本也删掉
+          rm -rf feeds/luci/applications/luci-app-passwall
+          rm -rf feeds/luci/applications/luci-app-passwall2
+          echo "=== 删除后的 net 目录中代理相关残留 ==="
+          ls feeds/packages/net/ | grep -Ei 'xray|sing|shadowsocks|chinadns|dns2socks|hysteria|obfs|tcping|geoview|shadow-tls|naiveproxy|ipt2socks|microsocks' || echo "OK: 已清空"
+          echo "=== passwall feed 是否拉到 ==="
+          ls -d feeds/passwall_packages feeds/passwall_luci feeds/passwall2_luci 2>/dev/null || true
+          ls feeds/passwall_packages/ | head -30
+
+      - name: Install PassWall packages
+        run: |
+          cd openwrt
+          ./scripts/feeds install -a -p passwall_packages
+          ./scripts/feeds install -a -p passwall_luci
+          ./scripts/feeds install -a -p passwall2_luci
+          echo "=== 确认三个 luci app 都进了 package/feeds ==="
+          ls -d package/feeds/passwall_luci/* package/feeds/passwall2_luci/* 2>/dev/null || true
+          ls -d package/feeds/passwall_packages/* 2>/dev/null | head -30 || true
+
+      - name: Load config
+        run: |
+          cd openwrt
+          cp "$GITHUB_WORKSPACE/config-24.10-c526a" .config
+          # 第一轮：解析出全部 select 依赖
+          make defconfig
+          # 第二轮：强制应用我们的 =n（PassWall 的 INCLUDE_xxx 是 select 关系，
+          #         光靠 .config 里的 =n 可能被 select 拉回来，必须再覆盖一次）
+          echo "=== 强制关闭编译昂贵的包 ==="
+          for opt in \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Plugin \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray_Plugin \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadowsocks_Rust_Client \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadow_TLS \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadowsocks_Rust_Client \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_V2ray_Plugin \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy \
+            CONFIG_PACKAGE_shadowsocks-rust-sslocal \
+            CONFIG_PACKAGE_hysteria \
+            CONFIG_PACKAGE_v2ray-plugin \
+            CONFIG_PACKAGE_xray-plugin \
+            CONFIG_PACKAGE_shadow-tls \
+            CONFIG_PACKAGE_haproxy ; do
+            ./scripts/config --set-val "$opt" n
+          done
+          # 再跑一次，让依赖树重新收敛
+          make defconfig
+          echo "=== 收敛后复查（应全为 n 或不存在）==="
+          for opt in \
+            CONFIG_PACKAGE_shadowsocks-rust-sslocal \
+            CONFIG_PACKAGE_hysteria \
+            CONFIG_PACKAGE_v2ray-plugin \
+            CONFIG_PACKAGE_xray-plugin \
+            CONFIG_PACKAGE_shadow-tls \
+            CONFIG_PACKAGE_haproxy ; do
+            got=$(grep -E "^${opt}=" .config || echo "${opt}  (未定义)")
+            echo "  $got"
+          done
+
+      - name: Verify target, driver and PassWall
+        run: |
+          cd openwrt
+          echo "=== target ==="
+          grep -E 'CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)' .config
+          echo ""
+          echo "=== 设备是否存在 ==="
+          grep -A20 'define Device/hiwifi_c526a' target/linux/ipq40xx/image/generic.mk
+          echo ""
+          echo "=== files-6.6 DTS ==="
+          ls -la target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts
+          echo ""
+          echo "=== ipqess 必须存在，essedma 必须不存在 ==="
+          ls target/linux/ipq40xx/patches-6.6/ | grep -i ipqess || echo "!! ipqess 补丁缺失"
+          ls target/linux/ipq40xx/patches-6.6/ | grep -i essedma && echo "!! 还有 essedma" || echo "OK: 无 essedma"
+          echo ""
+          echo "=== ★ PassWall 是否真的进了 .config ==="
+          grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)|CONFIG_PACKAGE_luci-i18n-passwall' .config || echo "!! PassWall 未进 config"
+          echo ""
+          echo "=== ★ 代理核心是否齐全 ==="
+          for p in xray-core sing-box chinadns-ng dns2socks microsocks ipt2socks \
+                   shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir \
+                   simple-obfs-client geoview v2ray-geoip v2ray-geosite tcping lyaml; do
+            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+              echo "  [OK]   $p"
+            else
+              echo "  [MISS] $p"
+            fi
+          done
+          echo ""
+          echo "=== ★ 已砍掉的昂贵包（应为 n）==="
+          for p in shadowsocks-rust-sslocal hysteria v2ray-plugin xray-plugin shadow-tls haproxy; do
+            v=$(grep -E "^CONFIG_PACKAGE_${p}=" .config | cut -d= -f2)
+            echo "  ${p} = ${v:-未定义}"
+          done
+          echo ""
+          echo "=== ★ 透明代理栈（firewall4 → nftables） ==="
+          grep -E 'CONFIG_PACKAGE_kmod-nft-(tproxy|socket|nat)=|CONFIG_PACKAGE_(nftables|dnsmasq-full)=' .config || true
+
+      - name: Download package sources
+        run: |
+          cd openwrt
+          make -j$(nproc) download
+        continue-on-error: true
+
+      - name: Build
+        run: |
+          cd openwrt
+          make -j$(nproc) V=s 2>&1 | tee build.log
+        # 如果构建失败，下一步仍然上传日志
+
+      - name: Show tail of build log
+        if: always()
+        run: |
+          cd openwrt
+          tail -80 build.log || true
+          echo "=== 错误行 ==="
+          grep -n -i "error" build.log | tail -40 || true
+
+      - name: Prepare artifacts
+        if: always()
+        run: |
+          mkdir -p output
+          cd openwrt
+          find bin/targets/ipq40xx -type f \( -name "*.bin" -o -name "*.ubi" -o -name "*.itb" \
+            -o -name "*metadata*" -o -name "profiles.json" -o -name "*.buildinfo" \) \
+            -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
+          # 顺便把编译出的 passwall ipk 也带上（以后想单独装也方便）
+          find bin/packages -type f -name "*passwall*" \
+            -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/output/"
+          cat bin/targets/ipq40xx/generic/*.buildinfo 2>/dev/null || true
+
+      - name: Upload firmware
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: c526a-24.10-ipqess-passwall-firmware
+          path: output/
+          if-no-files-found: warn
+          retention-days: 30

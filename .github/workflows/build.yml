@@ -89,52 +89,66 @@ jobs:
 
       - name: Remove conflicting official proxy packages
         run: |
+          set -e
           cd openwrt
           # PassWall README 明确要求：官方 feed 自带的这些包版本与 passwall 预期不一致，
           # 不删会导致编译冲突或运行异常。
-          rm -rf feeds/packages/net/xray-core \
-                 feeds/packages/net/v2ray-geodata \
-                 feeds/packages/net/sing-box \
-                 feeds/packages/net/chinadns-ng \
-                 feeds/packages/net/dns2socks \
-                 feeds/packages/net/hysteria \
-                 feeds/packages/net/ipt2socks \
-                 feeds/packages/net/microsocks \
-                 feeds/packages/net/naiveproxy \
-                 feeds/packages/net/shadowsocks-rust \
-                 feeds/packages/net/shadowsocksr-libev \
-                 feeds/packages/net/simple-obfs \
-                 feeds/packages/net/tcping \
-                 feeds/packages/net/tuic-client \
-                 feeds/packages/net/v2ray-plugin \
-                 feeds/packages/net/xray-plugin \
-                 feeds/packages/net/geoview \
-                 feeds/packages/net/shadow-tls
-          # 官方 luci 里过时的 passwall 版本也删掉
-          rm -rf feeds/luci/applications/luci-app-passwall
-          rm -rf feeds/luci/applications/luci-app-passwall2
-          echo "=== 删除后的 net 目录中代理相关残留 ==="
+          #
+          # ⚠️ 关键：不能只 rm -rf 源目录！必须先用 feeds uninstall 摘掉 package/feeds/
+          #    下的软链接，再 rm 源目录，最后 feeds update -i 重建索引。
+          #    否则 package/feeds/packages/xxx -> 已删除目录 = 断链，
+          #    make defconfig 扫描时会直接报错退出（Run #1 就是死在这里）。
+          DROP="xray-core v2ray-geodata sing-box chinadns-ng dns2socks hysteria \
+                ipt2socks microsocks naiveproxy shadowsocks-rust shadowsocksr-libev \
+                simple-obfs tcping tuic-client v2ray-plugin xray-plugin geoview shadow-tls"
+          for p in $DROP; do
+            if [ -d "feeds/packages/net/$p" ]; then
+              ./scripts/feeds uninstall "$p" 2>/dev/null || true
+              rm -rf "feeds/packages/net/$p"
+            fi
+          done
+          for p in luci-app-passwall luci-app-passwall2; do
+            if [ -d "feeds/luci/applications/$p" ]; then
+              ./scripts/feeds uninstall "$p" 2>/dev/null || true
+              rm -rf "feeds/luci/applications/$p"
+            fi
+          done
+          # 清掉残留断链
+          find package/feeds -maxdepth 3 -xtype l -delete 2>/dev/null || true
+          echo "=== 删除后的 net 目录中代理相关残留（应为空）==="
           ls feeds/packages/net/ | grep -Ei 'xray|sing|shadowsocks|chinadns|dns2socks|hysteria|obfs|tcping|geoview|shadow-tls|naiveproxy|ipt2socks|microsocks' || echo "OK: 已清空"
+          echo "=== package/feeds 下是否还有断链 ==="
+          find package/feeds -maxdepth 3 -xtype l 2>/dev/null | head -20 || true
+          echo "OK: 无断链"
           echo "=== passwall feed 是否拉到 ==="
           ls -d feeds/passwall_packages feeds/passwall_luci feeds/passwall2_luci 2>/dev/null || true
-          ls feeds/passwall_packages/ | head -30
 
       - name: Install PassWall packages
         run: |
+          set -e
           cd openwrt
+          # 删完官方包后必须重建索引，否则 install 仍按旧索引工作
+          ./scripts/feeds update -i
           ./scripts/feeds install -a -p passwall_packages
           ./scripts/feeds install -a -p passwall_luci
           ./scripts/feeds install -a -p passwall2_luci
           echo "=== 确认三个 luci app 都进了 package/feeds ==="
           ls -d package/feeds/passwall_luci/* package/feeds/passwall2_luci/* 2>/dev/null || true
-          ls -d package/feeds/passwall_packages/* 2>/dev/null | head -30 || true
+          echo "=== 关键包是否已进入 package/feeds/passwall_packages ==="
+          for p in xray-core sing-box chinadns-ng shadowsocksr-libev dns2socks simple-obfs geoview v2ray-geoip v2ray-geosite tcping microsocks ipt2socks; do
+            if [ -d "package/feeds/passwall_packages/$p" ]; then echo "  [OK]   $p"
+            elif [ -d "package/feeds/packages/$p" ]; then echo "  [off]  $p (官方 feed 提供)"
+            else echo "  [MISS] $p  <<< 需要关注"; fi
+          done
 
       - name: Load config
         run: |
+          set -e
           cd openwrt
           cp "$GITHUB_WORKSPACE/config-24.10-c526a" .config
-          # 第一轮：解析出全部 select 依赖
+          echo "=== 第一轮 defconfig（解析 select 依赖）==="
           make defconfig
+          echo "第一轮 OK, exit=$?"
           # 第二轮：强制应用我们的 =n（PassWall 的 INCLUDE_xxx 是 select 关系，
           #         光靠 .config 里的 =n 可能被 select 拉回来，必须再覆盖一次）
           echo "=== 强制关闭编译昂贵的包 ==="
@@ -154,9 +168,9 @@ jobs:
             CONFIG_PACKAGE_xray-plugin \
             CONFIG_PACKAGE_shadow-tls \
             CONFIG_PACKAGE_haproxy ; do
-            ./scripts/config --set-val "$opt" n
+            ./scripts/config --set-val "$opt" n 2>/dev/null || true
           done
-          # 再跑一次，让依赖树重新收敛
+          echo "=== 第三轮 defconfig（重新收敛）==="
           make defconfig
           echo "=== 收敛后复查（应全为 n 或不存在）==="
           for opt in \
@@ -169,22 +183,45 @@ jobs:
             got=$(grep -E "^${opt}=" .config || echo "${opt}  (未定义)")
             echo "  $got"
           done
+          echo "=== .config 是否生成成功 ==="
+          ls -la .config && wc -l .config
 
       - name: Verify target, driver and PassWall
         run: |
           cd openwrt
+          FAIL=0
           echo "=== target ==="
           grep -E 'CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)' .config
           echo ""
-          echo "=== 设备是否存在 ==="
-          grep -A20 'define Device/hiwifi_c526a' target/linux/ipq40xx/image/generic.mk
+          echo "=== 设备是否存在（generic.mk）==="
+          grep -A20 'define Device/hiwifi_c526a' target/linux/ipq40xx/image/generic.mk \
+            || { echo "!! generic.mk 里没有 Device/hiwifi_c526a"; FAIL=1; }
           echo ""
-          echo "=== files-6.6 DTS ==="
-          ls -la target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts
+          echo "=== files-6.6 DTS（补丁新增）==="
+          ls -la target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts \
+            || { echo "!! DTS 未落地"; FAIL=1; }
           echo ""
-          echo "=== ipqess 必须存在，essedma 必须不存在 ==="
-          ls target/linux/ipq40xx/patches-6.6/ | grep -i ipqess || echo "!! ipqess 补丁缺失"
-          ls target/linux/ipq40xx/patches-6.6/ | grep -i essedma && echo "!! 还有 essedma" || echo "OK: 无 essedma"
+          echo "=== ipqess 补丁必须存在（上游 24.10 自带 700~711 共 9 个）==="
+          if [ ! -d target/linux/ipq40xx/patches-6.6 ]; then
+            echo "!! patches-6.6 目录不存在"; FAIL=1
+          else
+            n=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci ipqess)
+            echo "ipqess 相关补丁数 = $n（期望 >=9）"
+            ls target/linux/ipq40xx/patches-6.6/ | grep -i ipqess
+            [ "$n" -ge 9 ] || { echo "!! ipqess 补丁不足"; FAIL=1; }
+            # 注意：不能写成 `ls|xargs grep && A || B`，管道失败会误报 OK
+            m=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci essedma)
+            echo "essedma 相关补丁数 = $m（必须为 0）"
+            [ "$m" -eq 0 ] || { echo "!! 仍有 essedma 补丁"; FAIL=1; }
+          fi
+          echo ""
+          echo "=== 源码层二次确认：ipqess 源文件在、essedma 源文件不在 ==="
+          find target/linux/ipq40xx -type d -name ipqess 2>/dev/null | head
+          if find target/linux/ipq40xx -type d -name essedma 2>/dev/null | grep -q .; then
+            echo "!! 存在 essedma 源码目录"; FAIL=1
+          else
+            echo "OK: 无 essedma 源码目录"
+          fi
           echo ""
           echo "=== ★ PassWall 是否真的进了 .config ==="
           grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)|CONFIG_PACKAGE_luci-i18n-passwall' .config || echo "!! PassWall 未进 config"
@@ -208,6 +245,12 @@ jobs:
           echo ""
           echo "=== ★ 透明代理栈（firewall4 → nftables） ==="
           grep -E 'CONFIG_PACKAGE_kmod-nft-(tproxy|socket|nat)=|CONFIG_PACKAGE_(nftables|dnsmasq-full)=' .config || true
+          echo ""
+          if [ "$FAIL" -ne 0 ]; then
+            echo "!! 自检未通过（见上面 ! 标记），提前失败以便定位"
+            exit 1
+          fi
+          echo "=== 全部自检通过 ==="
 
       - name: Download package sources
         run: |

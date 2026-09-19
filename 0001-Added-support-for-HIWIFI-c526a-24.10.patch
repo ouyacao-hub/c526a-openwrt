@@ -1,0 +1,546 @@
+From 0f8d5d1a679edefbdfbbe1ef763950f23a75f759 Mon Sep 17 00:00:00 2001
+From: C526A Build <build@c526a.local>
+Date: Sat, 19 Sep 2026 19:29:02 +0800
+Subject: [PATCH] =?UTF-8?q?ipq40xx:=20add=20support=20for=20HiWiFi=20C526A?=
+ =?UTF-8?q?=20(=E6=9E=81=E8=B7=AF=E7=94=B1X)=20on=2024.10/ipqess?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ported from keli/openwrt-hiwifi-c526a (patches-5.10 / essedma era) to
+openwrt-24.10 (kernel 6.6 / ipqess + DSA).
+
+- DTS placed under files-6.6/arch/arm/boot/dts/qcom/
+- ethernet nodes rewritten for ipqess: &mdio &gmac &switch &swport1..5
+- 02_network uses ucidef_set_interfaces_lan_wan (DSA auto-creates ports)
+- dropped patches-5.10/903-arm-boot-add-dts-files.patch (removed upstream)
+
+Specs: IPQ4019, 128MB NAND (ubi), 5x GbE, 512MB RAM.
+---
+ package/firmware/ipq-wifi/Makefile            |   1 +
+ .../ipq40xx/base-files/etc/board.d/02_network |   3 +
+ .../etc/hotplug.d/firmware/11-ath10k-caldata  |   8 +
+ .../etc/hotplug.d/ieee80211/10_fix_wifi_mac   |  21 +
+ .../base-files/etc/init.d/mt7615_reboot       |  13 +
+ .../base-files/lib/upgrade/platform.sh        |   1 +
+ .../arm/boot/dts/qcom/qcom-ipq4019-c526a.dts  | 371 ++++++++++++++++++
+ target/linux/ipq40xx/image/generic.mk         |  13 +
+ 8 files changed, 431 insertions(+)
+ create mode 100644 target/linux/ipq40xx/base-files/etc/hotplug.d/ieee80211/10_fix_wifi_mac
+ create mode 100644 target/linux/ipq40xx/base-files/etc/init.d/mt7615_reboot
+ create mode 100644 target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts
+
+diff --git a/package/firmware/ipq-wifi/Makefile b/package/firmware/ipq-wifi/Makefile
+index 569bf1b..e03dab4 100644
+--- a/package/firmware/ipq-wifi/Makefile
++++ b/package/firmware/ipq-wifi/Makefile
+@@ -70,6 +70,7 @@ ALLWIFIBOARDS:= \
+ 	zte_mf269 \
+ 	zte_mf287 \
+ 	zte_mf287plus \
++	hiwifi_c526a \
+ 	zyxel_nbg7815
+ 
+ ALLWIFIPACKAGES:=$(foreach BOARD,$(ALLWIFIBOARDS),ipq-wifi-$(BOARD))
+diff --git a/target/linux/ipq40xx/base-files/etc/board.d/02_network b/target/linux/ipq40xx/base-files/etc/board.d/02_network
+index 549e1ac..4f4ab52 100644
+--- a/target/linux/ipq40xx/base-files/etc/board.d/02_network
++++ b/target/linux/ipq40xx/base-files/etc/board.d/02_network
+@@ -48,6 +48,9 @@ ipq40xx_setup_interfaces()
+ 	zte,mf289f)
+ 		ucidef_set_interfaces_lan_wan "lan" "wan"
+ 		;;
++	hiwifi,c526a)
++		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
++		;;
+ 	aruba,ap-303|\
+ 	aruba,ap-365|\
+ 	avm,fritzrepeater-1200|\
+diff --git a/target/linux/ipq40xx/base-files/etc/hotplug.d/firmware/11-ath10k-caldata b/target/linux/ipq40xx/base-files/etc/hotplug.d/firmware/11-ath10k-caldata
+index 9581472..7bf1436 100644
+--- a/target/linux/ipq40xx/base-files/etc/hotplug.d/firmware/11-ath10k-caldata
++++ b/target/linux/ipq40xx/base-files/etc/hotplug.d/firmware/11-ath10k-caldata
+@@ -96,6 +96,10 @@ case "$FIRMWARE" in
+ 		caldata_extract "ART" 0x1000 0x2f20
+ 		ath10k_patch_mac $(mtd_get_mac_ascii CFG1 RADIOADDR0)
+ 		;;
++	hiwifi,c526a)
++		caldata_extract "ART" 0x1000 0x2f20
++		ath10k_patch_mac $(macaddr_add $(mtd_get_mac_ascii bdinfo "Vfac_mac ") +2)
++		;;
+ 	linksys,ea8300 |\
+ 	linksys,mr8300)
+ 		caldata_extract "ART" 0x1000 0x2f20
+@@ -192,6 +196,10 @@ case "$FIRMWARE" in
+ 		caldata_extract "ART" 0x5000 0x2f20
+ 		ath10k_patch_mac $(mtd_get_mac_ascii CFG1 RADIOADDR1)
+ 		;;
++	hiwifi,c526a)
++		caldata_extract "ART" 0x5000 0x2f20
++		ath10k_patch_mac $(macaddr_add $(mtd_get_mac_ascii bdinfo "Vfac_mac ") +3)
++		;;
+ 	linksys,ea8300 |\
+ 	linksys,mr8300)
+ 		caldata_extract "ART" 0x5000 0x2f20
+diff --git a/target/linux/ipq40xx/base-files/etc/hotplug.d/ieee80211/10_fix_wifi_mac b/target/linux/ipq40xx/base-files/etc/hotplug.d/ieee80211/10_fix_wifi_mac
+new file mode 100644
+index 0000000..0be00f5
+--- /dev/null
++++ b/target/linux/ipq40xx/base-files/etc/hotplug.d/ieee80211/10_fix_wifi_mac
+@@ -0,0 +1,21 @@
++#!/bin/ash
++
++[ "$ACTION" = "add" ] || exit 0
++
++PHYNBR=${DEVPATH##*/phy}
++
++[ -n $PHYNBR ] || exit 0
++
++. /lib/functions.sh
++. /lib/functions/system.sh
++
++board=$(board_name)
++
++case "$board" in
++	hiwifi,c526a)
++		[ "$PHYNBR" -eq 0 ] && \
++			mtd_get_mac_ascii bdinfo "Vfac_mac " > /sys${DEVPATH}/macaddress
++		;;
++	*)
++		;;
++esac
+diff --git a/target/linux/ipq40xx/base-files/etc/init.d/mt7615_reboot b/target/linux/ipq40xx/base-files/etc/init.d/mt7615_reboot
+new file mode 100644
+index 0000000..47c35a2
+--- /dev/null
++++ b/target/linux/ipq40xx/base-files/etc/init.d/mt7615_reboot
+@@ -0,0 +1,13 @@
++#!/bin/sh /etc/rc.common
++
++STOP=60
++
++stop() {
++	. /lib/functions.sh
++
++	case $(board_name) in
++		hiwifi,c526a)
++			rmmod mt7615e
++			;;
++	esac
++}
+diff --git a/target/linux/ipq40xx/base-files/lib/upgrade/platform.sh b/target/linux/ipq40xx/base-files/lib/upgrade/platform.sh
+index 53a9561..5a9d4ed 100644
+--- a/target/linux/ipq40xx/base-files/lib/upgrade/platform.sh
++++ b/target/linux/ipq40xx/base-files/lib/upgrade/platform.sh
+@@ -116,6 +116,7 @@ platform_do_upgrade() {
+ 	edgecore,ecw5211 |\
+ 	edgecore,oap100 |\
+ 	engenius,eap2200 |\
++	hiwifi,c526a |\
+ 	glinet,gl-a1300 |\
+ 	glinet,gl-ap1300 |\
+ 	luma,wrtq-329acn |\
+diff --git a/target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts b/target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts
+new file mode 100644
+index 0000000..7a41b5e
+--- /dev/null
++++ b/target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts
+@@ -0,0 +1,371 @@
++// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
++/*
++ * HiWiFi C526A (极路由X) — ported to OpenWrt 24.10 / ipqess
++ *
++ * 与 keli 原作 (patches-5.10 / essedma 时代) 的差异：
++ *   1. 节点名 mdio@90000 / ess-psgmii@98000 / ess-switch@c000000 / edma@c080000
++ *      → 改为 label 引用 &mdio &gmac &switch &swportN（ipqess + DSA 模型）
++ *   2. 新增 &watchdog / &prng 等现代表述（沿用官方 r619ac 风格）
++ *   3. 保留 C526A 专有的 SPI-NOR 分区表、bdinfo、Factory、NAND ubi 布局
++ *   4. Wi-Fi 部分：如需启用请参考文件末尾注释；本版默认关闭（旁路由只走有线）
++ */
++
++/dts-v1/;
++
++#include "qcom-ipq4019.dtsi"
++#include <dt-bindings/gpio/gpio.h>
++#include <dt-bindings/input/input.h>
++#include <dt-bindings/soc/qcom,tcsr.h>
++#include <dt-bindings/leds/common.h>
++
++/ {
++	model = "HiWiFi C526A";
++	compatible = "hiwifi,c526a";
++
++	aliases {
++		ethernet0 = &gmac;
++		led-boot = &led_boot;
++		led-failsafe = &led_boot;
++		led-running = &led_sys;
++		led-upgrade = &led_sys;
++	};
++
++	chosen {
++		bootargs-append = " ubi.mtd=ubi root=/dev/ubiblock0_1";
++	};
++
++	soc {
++		rng@22000 {
++			status = "okay";
++		};
++
++		tcsr@1949000 {
++			compatible = "qcom,tcsr";
++			reg = <0x1949000 0x100>;
++			qcom,wifi_glb_cfg = <TCSR_WIFI_GLB_CFG>;
++		};
++
++		tcsr@194b000 {
++			compatible = "qcom,tcsr";
++			reg = <0x194b000 0x100>;
++			qcom,usb-hsphy-mode-select = <TCSR_USB_HSPHY_HOST_MODE>;
++		};
++
++		ess_tcsr@1953000 {
++			compatible = "qcom,tcsr";
++			reg = <0x1953000 0x1000>;
++			qcom,ess-interface-select = <TCSR_ESS_PSGMII>;
++		};
++
++		tcsr@1957000 {
++			compatible = "qcom,tcsr";
++			reg = <0x1957000 0x100>;
++			qcom,wifi_noc_memtype_m0_m2 = <TCSR_WIFI_NOC_MEMTYPE_M0_M2>;
++		};
++
++		usb2@60f8800 {
++			status = "okay";
++		};
++
++		usb3@8af8800 {
++			status = "okay";
++		};
++
++		crypto@8e3a000 {
++			status = "okay";
++		};
++
++		watchdog@b017000 {
++			status = "okay";
++		};
++	};
++
++	leds {
++		compatible = "gpio-leds";
++
++		led_sys: blue {
++			label = "c526a:blue:sys";
++			gpios = <&tlmm 36 GPIO_ACTIVE_LOW>;
++		};
++
++		led_boot: red {
++			label = "c526a:red:sys";
++			gpios = <&tlmm 40 GPIO_ACTIVE_LOW>;
++			panic-indicator;
++		};
++	};
++
++	keys {
++		compatible = "gpio-keys";
++
++		reset {
++			label = "reset";
++			gpios = <&tlmm 18 GPIO_ACTIVE_LOW>;
++			linux,code = <KEY_RESTART>;
++		};
++	};
++};
++
++&blsp_dma {
++	status = "okay";
++};
++
++&blsp1_spi1 {
++	status = "okay";
++
++	flash@0 {
++		reg = <0>;
++		compatible = "jedec,spi-nor";
++		spi-max-frequency = <24000000>;
++
++		partitions {
++			compatible = "fixed-partitions";
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			partition@0 {
++				label = "SBL1";
++				reg = <0x0 0x40000>;
++				read-only;
++			};
++
++			partition@40000 {
++				label = "MIBIB";
++				reg = <0x40000 0x20000>;
++				read-only;
++			};
++
++			partition@60000 {
++				label = "QSEE";
++				reg = <0x60000 0x60000>;
++				read-only;
++			};
++
++			partition@c0000 {
++				label = "CDT";
++				reg = <0xc0000 0x10000>;
++				read-only;
++			};
++
++			partition@d0000 {
++				label = "DDRPARAMS";
++				reg = <0xd0000 0x10000>;
++				read-only;
++			};
++
++			partition@e0000 {
++				label = "APPSBLENV";
++				reg = <0xe0000 0x10000>;
++				read-only;
++			};
++
++			partition@f0000 {
++				label = "APPSBL";
++				reg = <0xf0000 0x80000>;
++				read-only;
++			};
++
++			/*
++			 * 注意：官方 r619ac 在 ART 里用 nvmem-layout 挂 precal，
++			 * C526A 沿用 keli 的裸分区写法即可；若走 ath10k 需要
++			 * 改成 nvmem-cell 方式（见文件末尾注释）。
++			 */
++			partition@170000 {
++				label = "ART";
++				reg = <0x170000 0x10000>;
++				read-only;
++			};
++
++			partition@180000 {
++				label = "bdinfo";
++				reg = <0x180000 0x10000>;
++				read-only;
++			};
++
++			partition@190000 {
++				label = "debug";
++				reg = <0x190000 0x10000>;
++				read-only;
++			};
++
++			partition@1a0000 {
++				label = "oem";
++				reg = <0x1a0000 0x20000>;
++				read-only;
++			};
++
++			factory: partition@1c0000 {
++				label = "Factory";
++				reg = <0x1c0000 0x10000>;
++				read-only;
++			};
++
++			partition@1d0000 {
++				label = "hw_panic";
++				reg = <0x1d0000 0x10000>;
++				read-only;
++			};
++
++			partition@1e0000 {
++				label = "upgrade_config";
++				reg = <0x1e0000 0x10000>;
++				read-only;
++			};
++		};
++	};
++};
++
++&blsp1_uart1 {
++	pinctrl-0 = <&serial_0_pins>;
++	pinctrl-names = "default";
++	status = "okay";
++};
++
++&cryptobam {
++	status = "okay";
++};
++
++&nand {
++	status = "okay";
++
++	nand@0 {
++		partitions {
++			compatible = "fixed-partitions";
++			#address-cells = <1>;
++			#size-cells = <1>;
++
++			partition@0 {
++				label = "ubi";
++				reg = <0x0 0x8000000>;	/* 128 MiB */
++			};
++		};
++	};
++};
++
++&pcie0 {
++	status = "okay";
++	perst-gpios = <&tlmm 38 GPIO_ACTIVE_LOW>;
++	wake-gpios = <&tlmm 50 GPIO_ACTIVE_LOW>;
++
++	bridge@0,0 {
++		reg = <0x00000000 0 0 0 0>;
++		#address-cells = <3>;
++		#size-cells = <2>;
++		ranges;
++	};
++};
++
++&qpic_bam {
++	status = "okay";
++};
++
++&tlmm {
++	mdio_pins: mdio_pinmux {
++		mux_1 {
++			pins = "gpio6";
++			function = "mdio";
++			bias-pull-up;
++		};
++
++		mux_2 {
++			pins = "gpio7";
++			function = "mdc";
++			bias-pull-up;
++		};
++	};
++
++	serial_0_pins: serial0-pinmux {
++		mux {
++			pins = "gpio16", "gpio17";
++			function = "blsp_uart0";
++			bias-disable;
++		};
++	};
++};
++
++/* ---------------------------------------------------------------
++ * 以下是 24.10 与 keli 原作差异最大的部分：ipqess + DSA 端口模型
++ * 官方 qca8k 驱动会依据这些 label 自动生成 lan1..lan4 / wan
++ * --------------------------------------------------------------- */
++
++&mdio {
++	status = "okay";
++	pinctrl-0 = <&mdio_pins>;
++	pinctrl-names = "default";
++};
++
++&gmac {
++	status = "okay";
++};
++
++&switch {
++	status = "okay";
++};
++
++&swport1 {
++	status = "okay";
++	label = "lan4";
++};
++
++&swport2 {
++	status = "okay";
++	label = "lan3";
++};
++
++&swport3 {
++	status = "okay";
++	label = "lan2";
++};
++
++&swport4 {
++	status = "okay";
++	label = "lan1";
++};
++
++&swport5 {
++	status = "okay";
++	/* 默认 label 就是 wan，无需重复声明 */
++};
++
++&usb3_ss_phy {
++	status = "okay";
++};
++
++&usb3_hs_phy {
++	status = "okay";
++};
++
++&usb2_hs_phy {
++	status = "okay";
++};
++
++/* ---------------------------------------------------------------
++ * Wi-Fi（默认关闭）
++ *
++ * 若日后要启用，按官方 r619ac 的写法改成：
++ *
++ * &wifi0 {
++ *	status = "okay";
++ *	nvmem-cell-names = "pre-calibration";
++ *	nvmem-cells = <&precal_art_1000>;
++ *	qcom,ath10k-calibration-variant = "C526A";
++ * };
++ * &wifi1 {
++ *	status = "okay";
++ *	nvmem-cell-names = "pre-calibration";
++ *	nvmem-cells = <&precal_art_5000>;
++ *	qcom,ath10k-calibration-variant = "C526A";
++ * };
++ *
++ * 并在 ART 分区加 nvmem-layout：
++ *	nvmem-layout {
++ *		compatible = "fixed-layout";
++ *		#address-cells = <1>;
++ *		#size-cells = <1>;
++ *		precal_art_1000: precal@1000 { reg = <0x1000 0x2f20>; };
++ *		precal_art_5000: precal@5000 { reg = <0x5000 0x2f20>; };
++ *	};
++ *
++ * 以及 PCIe 下 mt7615 的 mt76 节点（keli 原作写法）。
++ * 注意：keli 作者明确警告不要用 ath10k-ct，社区有多个 4019 网速问题未解决。
++ * --------------------------------------------------------------- */
+diff --git a/target/linux/ipq40xx/image/generic.mk b/target/linux/ipq40xx/image/generic.mk
+index 86bcaf8..5c67c3f 100644
+--- a/target/linux/ipq40xx/image/generic.mk
++++ b/target/linux/ipq40xx/image/generic.mk
+@@ -656,6 +656,19 @@ define Device/kernel-size-6350-8300
+ 	(e.g. "sysupgrade -n -F openwrt-squashfs-factory.bin" on command line)
+ endef
+ 
++define Device/hiwifi_c526a
++	$(call Device/FitzImage)
++	$(call Device/UbiFit)
++	DEVICE_VENDOR := HiWiFi
++	DEVICE_MODEL := C526A
++	SOC := qcom-ipq4019
++	DEVICE_DTS_CONFIG := config@1
++	BLOCKSIZE := 128k
++	PAGESIZE := 2048
++	DEVICE_PACKAGES := ipq-wifi-hiwifi_c526a
++endef
++TARGET_DEVICES += hiwifi_c526a
++
+ define Device/linksys_ea6350v3
+ 	# The Linksys EA6350v3 has a uboot bootloader that does not
+ 	# support either booting lzma kernel images nor booting UBI
+-- 
+2.55.0.windows.3
+

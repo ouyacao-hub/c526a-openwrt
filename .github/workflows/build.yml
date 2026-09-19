@@ -135,7 +135,10 @@ jobs:
           echo "=== 确认三个 luci app 都进了 package/feeds ==="
           ls -d package/feeds/passwall_luci/* package/feeds/passwall2_luci/* 2>/dev/null || true
           echo "=== 关键包是否已进入 package/feeds/passwall_packages ==="
-          for p in xray-core sing-box chinadns-ng shadowsocksr-libev dns2socks simple-obfs geoview v2ray-geoip v2ray-geosite tcping microsocks ipt2socks; do
+          # 注意：v2ray-geoip / v2ray-geosite 是 v2ray-geodata 包 build 出的「子包」，
+          # 目录名只有 v2ray-geodata → 不能按目录名找这两个名字，否则假 MISS。
+          for p in xray-core sing-box chinadns-ng shadowsocksr-libev dns2socks \
+                   simple-obfs geoview v2ray-geodata tcping microsocks ipt2socks; do
             if [ -d "package/feeds/passwall_packages/$p" ]; then echo "  [OK]   $p"
             elif [ -d "package/feeds/packages/$p" ]; then echo "  [off]  $p (官方 feed 提供)"
             else echo "  [MISS] $p  <<< 需要关注"; fi
@@ -201,18 +204,21 @@ jobs:
           ls -la target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts \
             || { echo "!! DTS 未落地"; FAIL=1; }
           echo ""
-          echo "=== ipqess 补丁必须存在（上游 24.10 自带 700~711 共 9 个）==="
+          echo "=== ipqess 补丁必须存在（上游 24.10 自带，实测 6 个含 ipqess 名）==="
           if [ ! -d target/linux/ipq40xx/patches-6.6 ]; then
             echo "!! patches-6.6 目录不存在"; FAIL=1
           else
             n=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci ipqess)
-            echo "ipqess 相关补丁数 = $n（期望 >=9）"
+            echo "ipqess 相关补丁数 = $n（期望 >=6）"
             ls target/linux/ipq40xx/patches-6.6/ | grep -i ipqess
-            [ "$n" -ge 9 ] || { echo "!! ipqess 补丁不足"; FAIL=1; }
+            [ "$n" -ge 6 ] || { echo "!! ipqess 补丁不足"; FAIL=1; }
             # 注意：不能写成 `ls|xargs grep && A || B`，管道失败会误报 OK
             m=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci essedma)
             echo "essedma 相关补丁数 = $m（必须为 0）"
             [ "$m" -eq 0 ] || { echo "!! 仍有 essedma 补丁"; FAIL=1; }
+            # DSA/switch 侧补丁（文件名不含 ipqess，但同属 ipqess+DSA 方案）
+            echo "--- DSA/qca8k/switch 相关补丁（应为 701/706/707 等）---"
+            ls target/linux/ipq40xx/patches-6.6/ | grep -Ei 'dsa|qca8k|switch-node'
           fi
           echo ""
           echo "=== 源码层二次确认：ipqess 源文件在、essedma 源文件不在 ==="
@@ -227,6 +233,8 @@ jobs:
           grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)|CONFIG_PACKAGE_luci-i18n-passwall' .config || echo "!! PassWall 未进 config"
           echo ""
           echo "=== ★ 代理核心是否齐全 ==="
+          # v2ray-geoip / v2ray-geosite 由 v2ray-geodata 包生成，config 里是独立的
+          # CONFIG_PACKAGE_v2ray-geoip=y，所以这里按 config 项查是对的。
           for p in xray-core sing-box chinadns-ng dns2socks microsocks ipt2socks \
                    shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir \
                    simple-obfs-client geoview v2ray-geoip v2ray-geosite tcping lyaml; do

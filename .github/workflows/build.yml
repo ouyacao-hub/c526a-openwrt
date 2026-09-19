@@ -193,8 +193,11 @@ jobs:
         run: |
           cd openwrt
           FAIL=0
+          # ⚠️ 本步骤由 GitHub 以 `bash -e` 执行 → 任何 grep 无匹配(退 1)都会
+          #    直接终止脚本。所以：① 所有「仅展示用」的 grep 一律 `|| true`；
+          #    ② 所有「判定用」的 grep 用 `grep -c` 取值再数值比较，不要裸用。
           echo "=== target ==="
-          grep -E 'CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)' .config
+          grep -E 'CONFIG_TARGET_(BOARD|SUBTARGET|PROFILE)' .config || true
           echo ""
           echo "=== 设备是否存在（generic.mk）==="
           grep -A20 'define Device/hiwifi_c526a' target/linux/ipq40xx/image/generic.mk \
@@ -208,21 +211,20 @@ jobs:
           if [ ! -d target/linux/ipq40xx/patches-6.6 ]; then
             echo "!! patches-6.6 目录不存在"; FAIL=1
           else
-            n=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci ipqess)
+            n=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci ipqess || true)
             echo "ipqess 相关补丁数 = $n（期望 >=6）"
-            ls target/linux/ipq40xx/patches-6.6/ | grep -i ipqess
+            ls target/linux/ipq40xx/patches-6.6/ | grep -i ipqess || true
             [ "$n" -ge 6 ] || { echo "!! ipqess 补丁不足"; FAIL=1; }
-            # 注意：不能写成 `ls|xargs grep && A || B`，管道失败会误报 OK
-            m=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci essedma)
+            m=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci essedma || true)
             echo "essedma 相关补丁数 = $m（必须为 0）"
             [ "$m" -eq 0 ] || { echo "!! 仍有 essedma 补丁"; FAIL=1; }
             # DSA/switch 侧补丁（文件名不含 ipqess，但同属 ipqess+DSA 方案）
-            echo "--- DSA/qca8k/switch 相关补丁（应为 701/706/707 等）---"
-            ls target/linux/ipq40xx/patches-6.6/ | grep -Ei 'dsa|qca8k|switch-node'
+            echo "--- DSA/qca8k/switch 相关补丁（仅展示）---"
+            ls target/linux/ipq40xx/patches-6.6/ | grep -Ei 'dsa|qca8k|switch' || echo "(无)"
           fi
           echo ""
           echo "=== 源码层二次确认：ipqess 源文件在、essedma 源文件不在 ==="
-          find target/linux/ipq40xx -type d -name ipqess 2>/dev/null | head
+          find target/linux/ipq40xx -type d -name ipqess 2>/dev/null | head || true
           if find target/linux/ipq40xx -type d -name essedma 2>/dev/null | grep -q .; then
             echo "!! 存在 essedma 源码目录"; FAIL=1
           else
@@ -230,7 +232,8 @@ jobs:
           fi
           echo ""
           echo "=== ★ PassWall 是否真的进了 .config ==="
-          grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)|CONFIG_PACKAGE_luci-i18n-passwall' .config || echo "!! PassWall 未进 config"
+          grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)|CONFIG_PACKAGE_luci-i18n-passwall' .config \
+            || echo "!! PassWall 未进 config"
           echo ""
           echo "=== ★ 代理核心是否齐全 ==="
           # v2ray-geoip / v2ray-geosite 由 v2ray-geodata 包生成，config 里是独立的
@@ -247,7 +250,7 @@ jobs:
           echo ""
           echo "=== ★ 已砍掉的昂贵包（应为 n）==="
           for p in shadowsocks-rust-sslocal hysteria v2ray-plugin xray-plugin shadow-tls haproxy; do
-            v=$(grep -E "^CONFIG_PACKAGE_${p}=" .config | cut -d= -f2)
+            v=$(grep -E "^CONFIG_PACKAGE_${p}=" .config 2>/dev/null | cut -d= -f2 || true)
             echo "  ${p} = ${v:-未定义}"
           done
           echo ""

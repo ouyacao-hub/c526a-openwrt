@@ -126,10 +126,24 @@ jobs:
               rm -rf "feeds/luci/applications/$p"
             fi
           done
+
+          # ★★★ geoview 必须从 passwall_packages feed 里也删掉 ★★★
+          # 它的 go.mod 要求 go>=1.25.0，而 24.10 的 golang 是 1.23.12 →
+          # 必然报 "go: ../../go.mod requires go >= 1.25.0 (running go 1.23.12)"
+          # → ERROR: package/feeds/passwall_packages/geoview failed to build. (Run #5 死因)
+          for p in geoview haproxy; do
+            if [ -d "feeds/passwall_packages/$p" ]; then
+              ./scripts/feeds uninstall "$p" 2>/dev/null || true
+              rm -rf "feeds/passwall_packages/$p"
+            fi
+          done
+
           # 清掉残留断链
           find package/feeds -maxdepth 3 -xtype l -delete 2>/dev/null || true
           echo "=== 删除后的 net 目录中代理相关残留（应为空）==="
           ls feeds/packages/net/ | grep -Ei 'xray|sing|shadowsocks|chinadns|dns2socks|hysteria|obfs|tcping|geoview|shadow-tls|naiveproxy|ipt2socks|microsocks' || echo "OK: 已清空"
+          echo "=== passwall_packages 里是否还有 geoview ==="
+          ls feeds/passwall_packages/ | grep -i geoview || echo "OK: geoview 已从 passwall feed 移除"
           echo "=== package/feeds 下是否还有断链 ==="
           find package/feeds -maxdepth 3 -xtype l 2>/dev/null | head -20 || true
           echo "OK: 无断链"
@@ -151,11 +165,18 @@ jobs:
           # 注意：v2ray-geoip / v2ray-geosite 是 v2ray-geodata 包 build 出的「子包」，
           # 目录名只有 v2ray-geodata → 不能按目录名找这两个名字，否则假 MISS。
           for p in xray-core sing-box chinadns-ng shadowsocksr-libev dns2socks \
-                   simple-obfs geoview v2ray-geodata tcping microsocks ipt2socks; do
+                   simple-obfs v2ray-geodata tcping microsocks ipt2socks; do
             if [ -d "package/feeds/passwall_packages/$p" ]; then echo "  [OK]   $p"
             elif [ -d "package/feeds/packages/$p" ]; then echo "  [off]  $p (官方 feed 提供)"
             else echo "  [MISS] $p  <<< 需要关注"; fi
           done
+          echo "=== geoview 必须【不存在】（go>=1.25 而 24.10 只有 1.23）==="
+          if [ -d "package/feeds/passwall_packages/geoview" ] || [ -d "feeds/passwall_packages/geoview" ]; then
+            echo "  !! geoview 仍在 → 会让 make 失败，退出"
+            exit 1
+          else
+            echo "  OK: geoview 已彻底移除"
+          fi
 
       - name: Load config
         run: |
@@ -175,16 +196,20 @@ jobs:
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Shadow_TLS \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Hysteria \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_NaiveProxy \
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Shadowsocks_Rust_Client \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_V2ray_Plugin \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy \
+            CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Geoview \
             CONFIG_PACKAGE_shadowsocks-rust-sslocal \
             CONFIG_PACKAGE_hysteria \
             CONFIG_PACKAGE_v2ray-plugin \
             CONFIG_PACKAGE_xray-plugin \
             CONFIG_PACKAGE_shadow-tls \
+            CONFIG_PACKAGE_geoview \
             CONFIG_PACKAGE_haproxy ; do
             ./scripts/config --set-val "$opt" n 2>/dev/null || true
+            ./scripts/config --unset "$opt" 2>/dev/null || true
           done
           echo "=== 第三轮 defconfig（重新收敛）==="
           make defconfig
@@ -195,6 +220,7 @@ jobs:
             CONFIG_PACKAGE_v2ray-plugin \
             CONFIG_PACKAGE_xray-plugin \
             CONFIG_PACKAGE_shadow-tls \
+            CONFIG_PACKAGE_geoview \
             CONFIG_PACKAGE_haproxy ; do
             got=$(grep -E "^${opt}=" .config || echo "${opt}  (未定义)")
             echo "  $got"
@@ -271,9 +297,10 @@ jobs:
           echo "=== ★ 代理核心是否齐全 ==="
           # v2ray-geoip / v2ray-geosite 由 v2ray-geodata 包生成，config 里是独立的
           # CONFIG_PACKAGE_v2ray-geoip=y，所以这里按 config 项查是对的。
+          # ⚠️ geoview 已从必需清单移除：它要 go>=1.25 而 24.10 只有 1.23 → 必炸。
           for p in xray-core sing-box chinadns-ng dns2socks microsocks ipt2socks \
                    shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir \
-                   simple-obfs-client geoview v2ray-geoip v2ray-geosite tcping lyaml; do
+                   simple-obfs-client v2ray-geoip v2ray-geosite tcping lyaml; do
             if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
               echo "  [OK]   $p"
             else
@@ -281,14 +308,26 @@ jobs:
             fi
           done
           echo ""
-          echo "=== ★ 已砍掉的昂贵包（应为 n）==="
-          for p in shadowsocks-rust-sslocal hysteria v2ray-plugin xray-plugin shadow-tls haproxy; do
+          echo "=== ★★ 必须为 n 的包（含 geoview，Go 版本不兼容）★★ ==="
+          FAIL_GEOVIEW=0
+          for p in shadowsocks-rust-sslocal hysteria v2ray-plugin xray-plugin \
+                   shadow-tls haproxy geoview; do
             v=$(grep -E "^CONFIG_PACKAGE_${p}=" .config 2>/dev/null | cut -d= -f2 || true)
-            echo "  ${p} = ${v:-未定义}"
+            v=${v:-未定义}
+            echo "  ${p} = ${v}"
+            if [ "$v" = "y" ]; then
+              echo "     !! 必须为 n / 未定义，否则编译会失败"
+              FAIL=1
+              [ "$p" = "geoview" ] && FAIL_GEOVIEW=1
+            fi
           done
-          echo ""
-          echo "=== ★ 透明代理栈（firewall4 → nftables） ==="
-          grep -E 'CONFIG_PACKAGE_kmod-nft-(tproxy|socket|nat)=|CONFIG_PACKAGE_(nftables|dnsmasq-full)=' .config || true
+          # geoview 源码目录也必须真的没了
+          if [ -d feeds/passwall_packages/geoview ] || [ -d package/feeds/passwall_packages/geoview ]; then
+            echo "!! geoview 源码目录仍在，会被 make 编译到"
+            FAIL=1
+          else
+            echo "  OK: geoview 源码目录已移除"
+          fi
           echo ""
           if [ "$FAIL" -ne 0 ]; then
             echo "!! 自检未通过（见上面 ! 标记），提前失败以便定位"

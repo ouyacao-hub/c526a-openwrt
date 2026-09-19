@@ -55,6 +55,7 @@ jobs:
 
       - name: Apply C526A patch
         run: |
+          set -e
           cd openwrt
           git config user.email "build@c526a.local"
           git config user.name "C526A Build"
@@ -62,7 +63,19 @@ jobs:
           git am --3way "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-24.10.patch" \
             || (echo "=== git am 失败，尝试 apply ==="; \
                 git am --abort 2>/dev/null || true; \
-                git apply --3way "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-24.10.patch")
+                git apply --3way -v "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-24.10.patch")
+          # ★ 关键自检：补丁必须真的打上了，否则后面全白跑
+          echo "=== 补丁落地自检 ==="
+          test -f target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts \
+            || { echo "!! DTS 不存在，补丁没打上"; exit 1; }
+          grep -q 'hiwifi_c526a' target/linux/ipq40xx/image/generic.mk \
+            || { echo "!! generic.mk 里没有 hiwifi_c526a"; exit 1; }
+          # ★ 反向确认：不该再有 ipq-wifi 引用（上游没有 C526A 的 BDF blob）
+          if grep -rq 'ipq-wifi-hiwifi_c526a' target/linux/ipq40xx/ package/firmware/ipq-wifi/ 2>/dev/null; then
+            echo "!! 仍有 ipq-wifi-hiwifi_c526a 引用 —— 该包在上游不存在，会让 make download 失败"
+            exit 1
+          fi
+          echo "✅ 补丁落地自检通过"
           git log --oneline -3
 
       # ★★★ 加入 PassWall 第三方 feed ★★★
@@ -231,6 +244,26 @@ jobs:
             echo "OK: 无 essedma 源码目录"
           fi
           echo ""
+          echo "=== ★★ ipq-wifi-hiwifi_c526a 必须彻底不存在 ==="
+          # 官方 ipq-wifi 包的 ALLWIFIBOARDS 里没有 hiwifi_c526a，也没有对应 BDF blob。
+          # 一旦被 DEVICE_PACKAGES 或 .config 引用，`make download` 必然报：
+          #   ERROR: package/firmware/ipq-wifi failed to build.
+          # 校准数据改由 11-ath10k-caldata 从 mtd ART 分区现场提取。
+          w1=$(grep -c 'ipq-wifi-hiwifi_c526a' .config 2>/dev/null || true)
+          echo ".config 中 ipq-wifi-hiwifi_c526a 出现次数 = $w1（必须为 0）"
+          [ "$w1" -eq 0 ] || { echo "!! .config 仍引用该不存在的包"; FAIL=1; }
+          if grep -rq 'ipq-wifi-hiwifi_c526a' target/linux/ipq40xx/ 2>/dev/null; then
+            echo "!! target/linux/ipq40xx 下仍有引用"; FAIL=1
+          else
+            echo "OK: target 下无引用"
+          fi
+          w2=$(grep -c 'hiwifi_c526a' package/firmware/ipq-wifi/Makefile 2>/dev/null || true)
+          echo "ipq-wifi/Makefile 中 hiwifi_c526a 出现次数 = $w2（必须为 0）"
+          [ "$w2" -eq 0 ] || { echo "!! ipq-wifi/Makefile 被污染了"; FAIL=1; }
+          echo "--- 校准数据来源（11-ath10k-caldata，应有 c526a 分支）---"
+          grep -B2 -A3 'c526a' target/linux/ipq40xx/base-files/etc/hotplug.d/firmware/11-ath10k-caldata \
+            || { echo "!! 11-ath10k-caldata 里没有 c526a 分支"; FAIL=1; }
+          echo ""
           echo "=== ★ PassWall 是否真的进了 .config ==="
           grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)|CONFIG_PACKAGE_luci-i18n-passwall' .config \
             || echo "!! PassWall 未进 config"
@@ -264,24 +297,45 @@ jobs:
           echo "=== 全部自检通过 ==="
 
       - name: Download package sources
+        # ⚠️ 这里不再 continue-on-error：Run #4 就是被它掩盖了
+        #    "ERROR: package/firmware/ipq-wifi failed to build." 而一路绿灯。
         run: |
           cd openwrt
           make -j$(nproc) download
-        continue-on-error: true
 
       - name: Build
+        # ★ 必须 set -o pipefail：
+        #   `make ... | tee build.log` 的退出码取的是 tee（永远 0），
+        #   不加 pipefail 的话 make 失败会被完全吞掉 → 假成功。
         run: |
+          set -o pipefail
           cd openwrt
           make -j$(nproc) V=s 2>&1 | tee build.log
-        # 如果构建失败，下一步仍然上传日志
 
       - name: Show tail of build log
         if: always()
         run: |
           cd openwrt
-          tail -80 build.log || true
+          tail -120 build.log || true
           echo "=== 错误行 ==="
-          grep -n -i "error" build.log | tail -40 || true
+          grep -n -i -E "error|failed to build" build.log | tail -60 || true
+
+      - name: Assert firmware produced
+        # ★ 硬守门：编不出来就别装作成功
+        if: always()
+        run: |
+          cd openwrt
+          echo "=== bin/targets/ipq40xx 实际内容 ==="
+          find bin/targets/ipq40xx -type f 2>/dev/null | head -40 || true
+          echo ""
+          n=$(find bin/targets/ipq40xx -type f \( -name "*.bin" -o -name "*.ubi" \) 2>/dev/null | wc -l)
+          echo "固件镜像数 = $n（期望 >=1）"
+          if [ "$n" -lt 1 ]; then
+            echo "!! 没有任何固件镜像产出，构建实际失败。"
+            echo "!! build.log 最后 60 行："
+            tail -60 build.log 2>/dev/null || true
+            exit 1
+          fi
 
       - name: Prepare artifacts
         if: always()
@@ -303,5 +357,6 @@ jobs:
         with:
           name: c526a-24.10-ipqess-passwall-firmware
           path: output/
-          if-no-files-found: warn
+          # ★ 空目录直接失败，不再上传空壳
+          if-no-files-found: error
           retention-days: 30

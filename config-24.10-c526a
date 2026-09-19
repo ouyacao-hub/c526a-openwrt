@@ -24,8 +24,14 @@ CONFIG_KERNEL_KALLSYMS=y
 CONFIG_KERNEL_DEBUG_INFO=n
 CONFIG_KERNEL_DEBUG_INFO_BTF=n
 
-# ---------- 板级 WiFi BDF（DEVICE_PACKAGES 已引用，必须存在） ----------
-CONFIG_PACKAGE_ipq-wifi-hiwifi_c526a=y
+# ---------- 板级 WiFi 校准数据 ----------
+# 注意：不要在此开启 CONFIG_PACKAGE_ipq-wifi-hiwifi_c526a！
+# 官方 ipq-wifi 包里没有 C526A 的 BDF blob（ALLWIFIBOARDS 无此项），
+# 一旦引用会导致 `make download` 报
+#   "ERROR: package/firmware/ipq-wifi failed to build."
+# 校准数据由 base-files 的 11-ath10k-caldata 热插拔脚本从 mtd 的 ART 分区现场提取：
+#   caldata_extract "ART" 0x1000 0x2f20   (2.4G)
+#   caldata_extract "ART" 0x5000 0x2f20   (5G)
 
 # ---------- 旁路由核心：LuCI + 中文 ----------
 CONFIG_PACKAGE_luci=y

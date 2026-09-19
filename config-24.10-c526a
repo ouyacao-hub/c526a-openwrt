@@ -132,8 +132,20 @@ CONFIG_PACKAGE_xray-plugin=n
 # shadow-tls：Go 编译，特殊场景才用 → 关
 CONFIG_PACKAGE_shadow-tls=n
 
+# ---------- geoview ★ 必须关闭 ----------
+# geoview 的 go.mod 要求 go >= 1.25.0，而 OpenWrt 24.10 自带的 golang 是 1.23.12，
+# 一旦选中必然编译失败：
+#   go: ../../go.mod requires go >= 1.25.0 (running go 1.23.12; GOTOOLCHAIN=local)
+#   make[3]: *** [.../geoview-0.2.6/.built] Error 1
+#   ERROR: package/feeds/passwall_packages/geoview failed to build.
+# geoview 只做规则集格式转换（sing-box/v2ray 互转），非翻墙必需 → 果断关掉。
+CONFIG_PACKAGE_geoview=n
+
+# ---------- haproxy ★ 必须关闭 ----------
+# 负载均衡用，非旁路由必需，且是重量级 C 编译（131s）。
+CONFIG_PACKAGE_haproxy=n
+
 # 体积小、非编译负担，保留
-CONFIG_PACKAGE_geoview=y
 CONFIG_PACKAGE_v2ray-geoip=y
 CONFIG_PACKAGE_v2ray-geosite=y
 CONFIG_PACKAGE_tcping=y

@@ -93,32 +93,6 @@ jobs:
           echo "=== feeds.conf.default ==="
           cat -A feeds.conf.default
 
-      # ★★★ Pin xray-core 到 v26.7.28 ★★★
-      # 为什么必须 pin：
-      #   passwall_packages feed 是滚动 main，当前 xray-core 是 26.9.9，
-      #   它的 go.mod 要求 go >= 1.27；而 openwrt-25.12 的 golang 是 1.26。
-      #   → 直接用 feed 现状必然报 "requires go >= 1.27 (running go 1.26.x)"。
-      #   v26.7.28 的 go.mod 是 "go 1.26"（无 toolchain 行）→ 正好匹配。
-      # 只改两个变量：PKG_VERSION 和 PKG_HASH（hash 是官方发布页给的 tarball sha256）。
-      - name: Pin xray-core to v26.7.28
-        run: |
-          set -e
-          cd openwrt
-          MK=feeds/passwall_packages/xray-core/Makefile
-          if [ ! -f "$MK" ]; then
-            echo "!! 找不到 $MK —— feeds 结构可能变了，需要人工核对"
-            ls -la feeds/passwall_packages/ | head -40
-            exit 1
-          fi
-          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=26.7.28/' "$MK"
-          sed -i 's/^PKG_HASH:=.*/PKG_HASH:=a9afe86349c7bd3e6cae60125e62a5ada09d102e1a2760623e77c24a84dbfb46/' "$MK"
-          echo "=== pin 后的关键行 ==="
-          grep -nE '^(PKG_NAME|PKG_VERSION|PKG_HASH|PKG_SOURCE_URL):=' "$MK"
-          grep -q '^PKG_VERSION:=26.7.28$' "$MK" || { echo "!! PKG_VERSION 没改成 26.7.28"; exit 1; }
-          grep -q '^PKG_HASH:=a9afe86349c7bd3e6cae60125e62a5ada09d102e1a2760623e77c24a84dbfb46$' "$MK" \
-            || { echo "!! PKG_HASH 没改对"; exit 1; }
-          echo "✅ xray-core 已 pin 到 v26.7.28 (go 1.26)"
-
       - name: Update feeds
         run: |
           cd openwrt
@@ -203,6 +177,49 @@ jobs:
           else
             echo "  OK: geoview 已彻底移除"
           fi
+
+      # ★★★ Pin xray-core 到 v26.7.28 ★★★
+      # ⚠️ 这一步必须放在 `Install PassWall packages` 之后 —— 只有那时
+      #    package/feeds/passwall_packages/xray-core/ 才真的存在。
+      #    （Run #8 就死在把它放在了 `Update feeds` 之前，
+      #     那时 feeds/passwall_packages/ 这个目录还没被拉下来。）
+      #
+      # 为什么必须 pin：
+      #   passwall_packages feed 是滚动 main，当前 xray-core 是 26.9.9，
+      #   它的 go.mod 要求 go >= 1.27；而 openwrt-25.12 的 golang 是 1.26。
+      #   → 直接用 feed 现状必然报 "requires go >= 1.27 (running go 1.26.x)"。
+      #   v26.7.28 的 go.mod 是 "go 1.26"（无 toolchain 行）→ 正好匹配。
+      # 只改两个变量：PKG_VERSION 和 PKG_HASH（hash 是官方 tarball 的 sha256）。
+      # 两个位置都要改：源目录 feeds/ + 已软链的 package/feeds/。
+      - name: Pin xray-core to v26.7.28
+        run: |
+          set -e
+          cd openwrt
+          H=a9afe86349c7bd3e6cae60125e62a5ada09d102e1a2760623e77c24a84dbfb46
+          FOUND=0
+          for MK in package/feeds/passwall_packages/xray-core/Makefile \
+                    feeds/passwall_packages/xray-core/Makefile ; do
+            if [ -f "$MK" ]; then
+              cp -f "$MK" "$MK.bak"
+              sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=26.7.28/' "$MK"
+              sed -i "s/^PKG_HASH:=.*/PKG_HASH:=$H/" "$MK"
+              echo "=== $MK pin 后 ==="
+              grep -nE '^(PKG_NAME|PKG_VERSION|PKG_HASH|PKG_SOURCE_URL):=' "$MK"
+              grep -q '^PKG_VERSION:=26\.7\.28$' "$MK" || { echo "!! PKG_VERSION 没改成 26.7.28"; exit 1; }
+              grep -q "^PKG_HASH:=$H\$" "$MK" || { echo "!! PKG_HASH 没改对"; exit 1; }
+              FOUND=$((FOUND+1))
+            fi
+          done
+          if [ "$FOUND" -eq 0 ]; then
+            echo "!! 两个位置都找不到 xray-core/Makefile —— feeds 结构变了，需人工核对"
+            echo "--- package/feeds/passwall_packages 是否存在 ---"
+            ls -d package/feeds/passwall_packages 2>/dev/null || echo "(不存在)"
+            echo "--- 该目录下含 xray 的项 ---"
+            ls package/feeds/passwall_packages/ 2>/dev/null | grep -i xray || echo "(无)"
+            ls feeds/passwall_packages/ 2>/dev/null | grep -i xray || echo "(无)"
+            exit 1
+          fi
+          echo "✅ xray-core 已 pin 到 v26.7.28 (go 1.26)，共改 $FOUND 处"
 
       - name: Load config
         run: |
@@ -409,17 +426,21 @@ jobs:
           echo ""
           echo "=== ★★ xray-core 必须已 pin 到 v26.7.28（go 1.26）★★ ==="
           # 背景：feed 滚动的 26.9.9 要 go>=1.27，而 25.12 的 golang 是 1.26 → 必炸。
-          XMK=feeds/passwall_packages/xray-core/Makefile
-          if [ -f "$XMK" ]; then
-            grep -nE '^(PKG_VERSION|PKG_HASH):=' "$XMK" || true
-            if grep -q '^PKG_VERSION:=26\.7\.28$' "$XMK"; then
-              echo "  [OK]   PKG_VERSION = 26.7.28"
-            else
-              echo "  !! PKG_VERSION 不是 26.7.28（会被 go 1.27 要求卡死）"; FAIL=1
+          XOK=0
+          for XMK in package/feeds/passwall_packages/xray-core/Makefile \
+                     feeds/passwall_packages/xray-core/Makefile ; do
+            if [ -f "$XMK" ]; then
+              echo "--- $XMK ---"
+              grep -nE '^(PKG_VERSION|PKG_HASH):=' "$XMK" || true
+              if grep -q '^PKG_VERSION:=26\.7\.28$' "$XMK"; then
+                echo "  [OK]   $XMK 已 pin"
+                XOK=$((XOK+1))
+              else
+                echo "  !! $XMK 的 PKG_VERSION 不是 26.7.28（会被 go 1.27 要求卡死）"; FAIL=1
+              fi
             fi
-          else
-            echo "  !! $XMK 不存在"; FAIL=1
-          fi
+          done
+          [ "$XOK" -ge 1 ] || { echo "  !! 两处都没找到/没 pin xray-core"; FAIL=1; }
           echo ""
           echo "=== ★★ golang 工具链版本（25.12 应为 1.26）★★ ==="
           if [ -d tools/golang ]; then

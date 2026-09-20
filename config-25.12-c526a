@@ -216,7 +216,18 @@ CONFIG_PACKAGE_ipset=y
 CONFIG_PACKAGE_ip-full=y
 
 # nftables 透明代理栈（25.12 主用）
-CONFIG_PACKAGE_nftables=y
+#
+# ⚠️ 注意：这里**故意不写** `CONFIG_PACKAGE_nftables=y`。
+#    `nftables` 不是真实 Kconfig 符号，它是【变体包基名 + PROVIDES 别名】：
+#      package/network/utils/nftables/Makefile:
+#        define Package/nftables-nojson   VARIANT:=nojson DEFAULT_VARIANT:=1
+#        define Package/nftables-json     VARIANT:=json
+#        两者均 PROVIDES:=nftables
+#    → 没有 define Package/nftables，写 `CONFIG_PACKAGE_nftables=y` 只是一行
+#      被丢弃的噪声（Run #15 就是因为断言它 =y 而自伤）。
+#    真正会被选中的是 nftables-json（firewall4 DEPENDS 里写的是 nftables-json），
+#    且它默认即 y，所以通常不出现在 .config / config.buildinfo 里 —— 属正常。
+#    ⇒ 不要断言 nftables 基名，改断言下面这些**实证存在**的 kmod-*。
 CONFIG_PACKAGE_kmod-nft-socket=y
 CONFIG_PACKAGE_kmod-nft-tproxy=y
 CONFIG_PACKAGE_kmod-nft-nat=y
@@ -262,8 +273,18 @@ CONFIG_PACKAGE_kmod-nf-reject6=y
 #     是【完全正确的预期结果】，不要去断言它必须存在。
 #     （另注：firewall4/Makefile 的 DEPENDS 里也没有任何 iptables，
 #       只有 +kmod-nft-core/-fib/-offload/-nat +nftables-json +ucode*）
-#   ⇒ 正确的必需项判据 = nftables + kmod-nft-{socket,tproxy,nat} + ipt2socks
-#                            + chinadns-ng
+#   ⇒ ★ 正确的必需项判据（第 4 版，已实测）★
+#     只断言【在 Run #12 success 产物的 config.buildinfo 里出现 =y】的符号：
+#         CONFIG_PACKAGE_kmod-nft-socket
+#         CONFIG_PACKAGE_kmod-nft-tproxy
+#         CONFIG_PACKAGE_chinadns-ng
+#         CONFIG_PACKAGE_ipt2socks
+#     （config.buildinfo 只记录非默认值 ⇒ 出现 =y 即确证存在。）
+#     ⛔ 不要断言 `nftables` / `iptables` / `kmod-nft-core` / `kmod-nft-nat`：
+#        前两个是 PROVIDES 别名 / 变体包基名（无同名符号）；
+#        后两个默认即 y，不进 config.buildinfo，断言会误杀。
+#     从**固件解包**的实装包清单已确证 kmod-nft-{core,fib,nat,offload,socket,tproxy}
+#     六个全部在固件里（这是最硬的证据，比 .config 更可靠）。
 #
 #   下面这行 `CONFIG_PACKAGE_iptables=y` 是「意图声明」：表示"如果要 iptables，
 #   优先解析成 nft 后端"。在纯 nft 模式下它可能不产生任何实际包，属正常。

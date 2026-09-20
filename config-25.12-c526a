@@ -185,19 +185,27 @@ CONFIG_PACKAGE_kmod-nf-reject=y
 CONFIG_PACKAGE_kmod-nf-reject6=y
 
 # ---------- iptables ----------
-# ★★★ 25.12 换用 apk 包管理器，这里有个致命互斥（Run #9 死因）★★★
+# ★★★ 致命互斥（Run #9 死因 / Run #10 复现）★★★
 #   `iptables` 是【虚拟提供者】包，25.12 里有两个候选：
 #     iptables-nft        provider-priority = 100
 #     iptables-zz-legacy  （优先级更低）
-#   → 写 `CONFIG_PACKAGE_iptables=y` 只会解析成优先级高的 **iptables-nft**。
-#   → 若同时再显式写 `iptables-zz-legacy=y`，两个互斥包同时进 world，apk 直接报：
-#        iptables-nft-1.8.10-r3:
-#          conflicts: iptables-zz-legacy-1.8.10-r3[iptables=1.8.10-r3]
-#        iptables-zz-legacy-1.8.10-r3:
-#          conflicts: iptables-nft-1.8.10-r3[iptables=1.8.10-r3]
-#        make[2]: *** [package/Makefile:100: package/install] Error 4
-#   ★ 结论：**`iptables-zz-legacy` 必须删掉**。25.12 默认 firewall4+nftables，
-#     走 nft 就对了，legacy 后端不需要。
+#
+#   ⚠️⚠️ 关键认知：**虚拟包的 provider 不能用 config 文件里的
+#      `# ... is not set` 排除！** 只要 `CONFIG_PACKAGE_iptables=y`，
+#      `make defconfig` 的求解器会把【所有候选 provider 都设为 y】。
+#      Run #10 实测：这里明明写着 "# CONFIG_PACKAGE_iptables-zz-legacy is not set"，
+#      defconfig 之后 .config 里变成了 `CONFIG_PACKAGE_iptables-zz-legacy=y`，
+#      于是两个互斥包同时进 world，apk 直接报：
+#          iptables-nft-1.8.10-r3:
+#            conflicts: iptables-zz-legacy-1.8.10-r3[iptables=1.8.10-r3]
+#          iptables-zz-legacy-1.8.10-r3:
+#            conflicts: iptables-nft-1.8.10-r3[iptables=1.8.10-r3]
+#          make[2]: *** [package/Makefile:100: package/install] Error 4
+#
+#   ★ 唯一可靠修法：在 build.yml 的 `Load config` 步骤里，
+#     **最后一次 defconfig 之后**用 sed 把 .config 写死为 n
+#     （和 PassWall 的 INCLUDE_* 完全同一套路）。
+#     这里保留 `is not set` 只是"意图声明"，靠它自己压不住。
 CONFIG_PACKAGE_iptables=y
 # CONFIG_PACKAGE_iptables-zz-legacy is not set
 CONFIG_PACKAGE_kmod-ipt-nat=y

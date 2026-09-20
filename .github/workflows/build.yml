@@ -44,12 +44,67 @@ jobs:
             python3-setuptools rsync swig unzip zlib1g-dev file wget ccache \
             libelf-dev python3-pyelftools
 
-      - name: Clone OpenWrt (openwrt-25.12, PINNED)
+      - name: Clone OpenWrt (openwrt-25.12 @ pinned commit)
+        env:
+          # ★★★ 钉到【具体 commit】，不是移动分支 ★★★
+          #
+          # 背景（外部审查指出，成立）：
+          #   原来写 `git clone --depth 1 --branch openwrt-25.12` 只钉住了【分支名】。
+          #   分支是移动目标 —— 上游一推进，同一天不同时间编出的源码就不同：
+          #     · 补丁上下文可能失效
+          #     · 内核补丁数会变（Verify 里的 ipqess>=6 / essedma=0 阈值可能失效）
+          #     · C526A 镜像行为可能变化
+          #   → 结果就是"同一份 workflow 在不同日期产出不同固件"，无法复现。
+          #
+          # 因此改为：先 clone 分支，再 checkout --detach 到已验证的 commit。
+          #
+          # 9facdff6fb001b7a4e8cea395b89278fd49ca92f
+          #   = openwrt-25.12 分支 HEAD，2026-09-01，Linux 6.12.108
+          #   = Run #12 实际使用、并【已成功产出可用固件】的那一个提交
+          #     （固件 version.buildinfo 里的 `r0-9facdff` 即此提交的短 SHA）
+          #
+          # 升级方式：想换新版本时，把下面的 SHA 换成目标 commit 的完整 SHA
+          #   （查法：GET https://api.github.com/repos/openwrt/openwrt/branches/openwrt-25.12
+          #           → commit.sha）
+          #   换完必须重跑一次完整验证，因为补丁与阈值都是针对旧 commit 校过的。
+          OPENWRT_COMMIT: 9facdff6fb001b7a4e8cea395b89278fd49ca92f
         run: |
-          # ★★★ 分支钉死，不用 master ★★★
-          git clone --depth 1 --branch openwrt-25.12 \
-            https://github.com/openwrt/openwrt.git openwrt
+          set -e
+          echo "目标 commit = $OPENWRT_COMMIT"
+
+          # ⚠️ 为什么不用 `--depth 1 --branch openwrt-25.12`：
+          #   浅克隆只有【分支头】一个 commit，checkout 不到历史里的指定 SHA。
+          #   这里用 `--depth 1 --no-single-branch` 先拿到分支头，
+          #   再 `git fetch --depth 1 origin <sha>` 精确取那个 commit —— 比
+          #   `--filter=blob:none`（会触发 blob 懒加载，大仓库上易中断）稳。
+          git init openwrt
           cd openwrt
+          git remote add origin https://github.com/openwrt/openwrt.git
+
+          # ① 精确取目标 commit（浅取一个，快）
+          git fetch --depth 1 origin "$OPENWRT_COMMIT"
+
+          # ② 钉住校验：确认确实取到了，且它就是我们要的
+          git checkout --detach FETCH_HEAD
+          ACTUAL=$(git rev-parse HEAD)
+          echo "实际 HEAD = $ACTUAL"
+          if [ "$ACTUAL" != "$OPENWRT_COMMIT" ]; then
+            echo "!! checkout 后 HEAD 与目标 commit 不一致"
+            exit 1
+          fi
+
+          # ③ 归属校验：确认这个 commit 确实在 openwrt-25.12 分支上
+          #    （防止误填成 master 上的 commit —— 那会拿到完全不同的内核）
+          git fetch --depth 1 origin openwrt-25.12
+          if git merge-base --is-ancestor "$OPENWRT_COMMIT" FETCH_HEAD; then
+            echo "OK: $OPENWRT_COMMIT 属于 openwrt-25.12"
+          else
+            echo "!! $OPENWRT_COMMIT 不是 openwrt-25.12 的祖先"
+            echo "!! 请确认 SHA 填对了（分支 HEAD 查法见上方注释）"
+            exit 1
+          fi
+
+          echo "=== 实际使用的源码版本（每次跑都必须与上面 SHA 一致）==="
           git log --oneline -1
           grep -E '^LINUX_VERSION-' include/kernel-version.mk || true
 
@@ -395,6 +450,8 @@ jobs:
             CONFIG_PACKAGE_haproxy \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Server \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy \
+            CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy \
+            CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy \
             CONFIG_PACKAGE_iptables-zz-legacy \
             CONFIG_PACKAGE_iptables-legacy ; do
             if grep -q "^${opt}=" .config; then
@@ -403,6 +460,12 @@ jobs:
               printf '# %s is not set\n' "$opt" >> .config
             fi
           done
+          # ★ 为什么必须连 Iptables_Transparent_Proxy 一起关（外部审查指出，成立）：
+          #   上游 Makefile 里这两个父选项 `select PACKAGE_iptables-zz-legacy`
+          #   （v2 甚至同时 select iptables-nft + iptables-zz-legacy，两者互斥）。
+          #   若父选项保持 y 而我们把 zz-legacy 写死为 n，就绕开了 Kconfig 依赖闭包：
+          #   配置"声称启用了 iptables 透明代理"，但所需 provider 被删 —— 自相矛盾状态。
+          #   设备是 firewall4，本就该只用 Nftables 版。
           echo "=== ★ 收尾复查（全部必须 not set / 未定义）==="
           BAD=0
           for opt in \
@@ -410,6 +473,8 @@ jobs:
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Geoview \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy \
+            CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy \
+            CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy \
             CONFIG_PACKAGE_geoview \
             CONFIG_PACKAGE_iptables-zz-legacy \
             CONFIG_PACKAGE_iptables-legacy \
@@ -424,7 +489,7 @@ jobs:
             echo "!! 收尾失败：仍有项被 select 拉回 y"
             exit 1
           fi
-          echo "OK: geoview / haproxy / iptables-zz-legacy 已全部关闭"
+          echo "OK: geoview / haproxy / iptables-zz-legacy / Iptables_Transparent_Proxy 已全部关闭"
 
           echo "=== ★ 反向断言：iptables-nft 必须为 y（25.12 的正解后端）==="
           if grep -qE '^CONFIG_PACKAGE_iptables-nft=y' .config; then
@@ -515,23 +580,50 @@ jobs:
             grep -n -A3 'hiwifi,c526a' "$CAL" || true
           fi
           echo ""
-          echo "=== ★ PassWall 是否真的进了 .config ==="
-          grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)|CONFIG_PACKAGE_luci-i18n-passwall' .config \
-            || echo "!! PassWall 未进 config"
+          echo "=== ★★ PassWall v1 与 v2 必须【同时】进固件（外部审查指出）★★ ==="
+          #
+          # ⚠️ 原来这里是：
+          #      grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)...' .config || echo "!! ..."
+          #    两个致命缺陷：
+          #      ① 【只 echo 不设 FAIL】→ 下面照样走到"全部自检通过"并上传固件
+          #      ② 那个正则只能证明"存在【某个】PassWall 相关配置项"，
+          #         连 i18n 包都算命中，**证明不了两个根包都为 y**
+          #    ⇒ 于是「v1 在、v2 没了」或「v2 在、v1 没了」都能全绿通过。
+          #      而用户硬需求就是 v1+v2 同时内置（SSR 只在 v1）→ 必须分别断言。
+          for p in luci-app-passwall luci-app-passwall2; do
+            if grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
+              echo "  [OK]   CONFIG_PACKAGE_${p}=y"
+            else
+              echo "  [MISS] CONFIG_PACKAGE_${p}  —— 必须为 y，否则缺一版 PassWall"
+              grep -E "^CONFIG_PACKAGE_${p}" .config || echo "         (config 里完全没有该项)"
+              FAIL=1
+            fi
+          done
+          echo "  --- i18n 包（仅展示，不作为判据）---"
+          grep -E '^CONFIG_PACKAGE_luci-i18n-passwall' .config || echo "    (无)"
           echo ""
-          echo "=== ★ 代理核心是否齐全 ==="
+          echo "=== ★★ 代理核心必须齐全（缺一个即 FAIL）★★ ==="
           # v2ray-geoip / v2ray-geosite 由 v2ray-geodata 包生成，config 里是独立的
           # CONFIG_PACKAGE_v2ray-geoip=y，所以这里按 config 项查是对的。
           # ⚠️ geoview 已从必需清单移除：它要 go>=1.25 而 24.10 只有 1.23 → 必炸。
+          # ⚠️ 原来这里是 if/else 只打印 [OK]/[MISS]，**不设 FAIL** →
+          #    xray-core / sing-box / chinadns-ng 全缺也能全绿通过。已改为计入 FAIL。
+          MISSING=""
           for p in xray-core sing-box chinadns-ng dns2socks microsocks ipt2socks \
                    shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir \
                    simple-obfs-client v2ray-geoip v2ray-geosite tcping lyaml; do
-            if grep -q "^CONFIG_PACKAGE_${p}=y" .config; then
+            if grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
               echo "  [OK]   $p"
             else
-              echo "  [MISS] $p"
+              echo "  [MISS] $p   —— 必需核心缺失"
+              MISSING="$MISSING $p"
             fi
           done
+          if [ -n "$MISSING" ]; then
+            echo "  !! 下列必需代理核心未进固件：$MISSING"
+            echo "  !! 固件即使编译成功也会缺功能（面板里选不中对应协议）"
+            FAIL=1
+          fi
           echo ""
           echo "=== ★★ 必须为 n 的包（含 geoview，Go 版本不兼容）★★ ==="
           for p in shadowsocks-rust-sslocal hysteria v2ray-plugin xray-plugin \
@@ -708,6 +800,25 @@ jobs:
           echo "  --- .config 里所有 iptables 相关行 ---"
           grep -nE 'CONFIG_PACKAGE_iptables' .config || true
           echo ""
+          echo "=== ★★ Nftables 透明代理必须启用（firewall4 的正解）★★ ==="
+          # 外部审查指出：收了 Iptables_Transparent_Proxy 就必须开 Nftables 版，
+          # 否则面板里连透明代理的选项都没有（固件"能跑但没法用"）。
+          nf1=$(grep -cE '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y' .config 2>/dev/null || true); nf1=${nf1:-0}
+          nf2=$(grep -cE '^CONFIG_PACKAGE_luci-app-passwall2_Nftables_Transparent_Proxy=y' .config 2>/dev/null || true); nf2=${nf2:-0}
+          echo "  passwall_Nftables_Transparent_Proxy  = $nf1（必须为 1）"
+          echo "  passwall2_Nftables_Transparent_Proxy = $nf2（必须为 1）"
+          [ "$nf1" -eq 1 ] || { echo "  !! v1 的 Nftables 透明代理未启用 → 面板无透明代理选项"; FAIL=1; }
+          [ "$nf2" -eq 1 ] || { echo "  !! v2 的 Nftables 透明代理未启用 → 面板无透明代理选项"; FAIL=1; }
+          # 反向：Iptables 版必须关（它会 select iptables-zz-legacy，与 nft 互斥）
+          for opt in CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy \
+                     CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy ; do
+            got=$(grep -E "^${opt}=" .config || echo "  ${opt} (未定义)")
+            echo "  $got"
+            case "$got" in
+              *"=y"*) echo "     !! Iptables 版必须为 n —— 它会 select iptables-zz-legacy（互斥）"; FAIL=1 ;;
+            esac
+          done
+          echo ""
           if [ "$FAIL" -ne 0 ]; then
             echo "!! 自检未通过（见上面 ! 标记），提前失败以便定位"
             exit 1
@@ -746,14 +857,80 @@ jobs:
           echo "=== bin/targets/ipq40xx 实际内容 ==="
           find bin/targets/ipq40xx -type f 2>/dev/null | head -40 || true
           echo ""
-          n=$(find bin/targets/ipq40xx -type f \( -name "*.bin" -o -name "*.ubi" \) 2>/dev/null | wc -l)
-          echo "固件镜像数 = $n（期望 >=1）"
-          if [ "$n" -lt 1 ]; then
-            echo "!! 没有任何固件镜像产出，构建实际失败。"
+
+          # ================================================================
+          # ★★★ 外部审查指出（成立）：原来只数「ipq40xx 下任意 .bin/.ubi 的个数」，
+          #     这**证明不了产物是 C526A 的**。以下情况都会全绿通过：
+          #       · .config 里 CONFIG_TARGET_..._DEVICE_hiwifi_c526a 被 defconfig 丢弃
+          #       · 补丁的设备定义变了，设备名不再是 hiwifi_c526a
+          #       · 构建落到了另一个 ipq40xx profile（同 target 下的别的机器）
+          #     ⇒ 结果可能是"给别人机器编的固件"被当成功上传。
+          #     必须断言：① 目标设备项在 ② 产物文件名属于 C526A ③ sysupgrade 存在且非空
+          # ================================================================
+          FAIL=0
+
+          echo "=== ① .config 里的 C526A 设备项 ==="
+          DEV_OPT='CONFIG_TARGET_ipq40xx_generic_DEVICE_hiwifi_c526a=y'
+          if grep -qx "$DEV_OPT" .config; then
+            echo "  [OK] $DEV_OPT"
+          else
+            echo "  [MISS] $DEV_OPT"
+            echo "  --- .config 里所有 ipq40xx 设备项 ---"
+            grep -E '^CONFIG_TARGET_ipq40xx_generic_DEVICE_' .config || echo "    (一个都没有)"
+            FAIL=1
+          fi
+          echo ""
+
+          echo "=== ② bin/targets/ipq40xx/generic 下的 C526A 镜像 ==="
+          ls -la bin/targets/ipq40xx/generic/ 2>/dev/null || echo "  (目录不存在)"
+          echo ""
+
+          # sysupgrade：给"已在跑 OpenWrt"的机器升级用，必须有
+          SU=$(find bin/targets/ipq40xx/generic -maxdepth 1 -type f \
+                 -name '*hiwifi_c526a*sysupgrade.bin' -print -quit 2>/dev/null || true)
+          if [ -n "$SU" ] && [ -s "$SU" ]; then
+            echo "  [OK] C526A sysupgrade = $SU  ($(wc -c < "$SU") B)"
+          else
+            echo "  [MISS] 未产出 C526A sysupgrade.bin"
+            FAIL=1
+          fi
+
+          # factory.ubi：首次刷机用（从原厂/其他固件进 U-Boot 恢复页刷）
+          FU=$(find bin/targets/ipq40xx/generic -maxdepth 1 -type f \
+                 -name '*hiwifi_c526a*squashfs-factory.ubi' -print -quit 2>/dev/null || true)
+          if [ -n "$FU" ] && [ -s "$FU" ]; then
+            echo "  [OK] C526A factory.ubi  = $FU  ($(wc -c < "$FU") B)"
+          else
+            echo "  [MISS] 未产出 C526A factory.ubi"
+            FAIL=1
+          fi
+
+          # initramfs：救援/内存运行用（与 sysupgrade 是两种独立启动路径）
+          IR=$(find bin/targets/ipq40xx/generic -maxdepth 1 -type f \
+                 -name '*hiwifi_c526a*initramfs*' -print -quit 2>/dev/null || true)
+          if [ -n "$IR" ] && [ -s "$IR" ]; then
+            echo "  [OK] C526A initramfs    = $IR  ($(wc -c < "$IR") B)"
+          else
+            echo "  [MISS] 未产出 C526A initramfs"
+            echo "         （initramfs 是刷机救援路径，缺了风险高；记为失败）"
+            FAIL=1
+          fi
+          echo ""
+
+          # 顺带报一下同 target 下有没有别的机器的产物（用来发现"编错设备"）
+          echo "=== ③ 同 target 下的其它产物（仅供核对，不影响判定）==="
+          find bin/targets/ipq40xx/generic -maxdepth 1 -type f \
+            \( -name '*.bin' -o -name '*.ubi' -o -name '*.itb' \) 2>/dev/null \
+            | grep -v 'hiwifi_c526a' | head -10 || echo "  (无其它设备产物 —— 符合预期)"
+          echo ""
+
+          if [ "$FAIL" -ne 0 ]; then
+            echo "!! 产物断言失败：未产出完整的 C526A 固件。"
             echo "!! build.log 最后 60 行："
             tail -60 build.log 2>/dev/null || true
             exit 1
           fi
+          echo "=== 产物断言通过：C526A 三种镜像齐全 ==="
 
       - name: Prepare artifacts
         if: always()

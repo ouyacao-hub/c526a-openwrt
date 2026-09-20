@@ -317,9 +317,12 @@ jobs:
               python3 "$STRIP" "$MK"
               echo "=== $MK 的 LUCI_DEPENDS ==="
               grep -n -A8 '^LUCI_DEPENDS' "$MK" || true
-              if grep -q 'geoview' "$MK"; then
-                echo "!! $MK 里仍有 geoview 残留"
-                grep -n 'geoview' "$MK"
+              # ⚠️ 只查 LUCI_DEPENDS 块！不能 `grep -q geoview "$MK"` 扫全文 ——
+              #    v1 的 config 段里有 `select PACKAGE_geoview`，那行是【条件 select】，
+              #    在 INCLUDE_Geoview=n 时无害，扫全文会误报（Run #11 就栽在这）。
+              if sed -n '/^LUCI_DEPENDS/,/[^\\]$/p' "$MK" | grep -q 'geoview'; then
+                echo "!! $MK 的 LUCI_DEPENDS 里仍有 geoview 残留"
+                sed -n '/^LUCI_DEPENDS/,/[^\\]$/p' "$MK"
                 exit 1
               fi
               N=$((N+1))
@@ -330,7 +333,7 @@ jobs:
             ls -d package/feeds/passwall_luci package/feeds/passwall2_luci 2>/dev/null || true
             exit 1
           fi
-          echo "✅ 已处理 passwall v1/v2 依赖，共 $N 处（无 geoview 残留）"
+          echo "✅ 已处理 passwall v1/v2 的 LUCI_DEPENDS，共 $N 处（无 geoview 硬依赖）"
 
       - name: Load config
         run: |
@@ -573,21 +576,71 @@ jobs:
           # ★ Run #10 教训：不能只扫 package/feeds/ —— feeds/ 下的源文件也要扫，
           #   而且**必须排除 .bak**（Drop 步骤自己留下的备份里有 geoview，会误报）。
           #   另外 v1(passwall_luci) 和 v2(passwall2_luci) 两个 feed 都要覆盖。
-          gvlist=$(grep -rl 'geoview' \
-                     package/feeds/passwall_luci/luci-app-passwall/Makefile \
-                     package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
-                     feeds/passwall_luci/luci-app-passwall/Makefile \
-                     feeds/passwall2_luci/luci-app-passwall2/Makefile \
-                     2>/dev/null | grep -v '\.bak$' || true)
-          if [ -z "$gvlist" ]; then gv=0; else gv=$(printf '%s\n' "$gvlist" | grep -c .); fi
-          gv=${gv:-0}
-          echo "  仍依赖 geoview 的 luci Makefile 数 = $gv（必须为 0）"
-          if [ "$gv" -ne 0 ]; then
-            echo "  !! 下列 Makefile 仍写着 geoview（会在 package/install 阶段报 no such package）"
-            printf '%s\n' "$gvlist"
+          # ================================================================
+          # ★★★ Run #11 教训：**判据必须只看 `LUCI_DEPENDS` 块，不能扫全文！** ★★★
+          #
+          #   我上一版用 `grep -rl 'geoview' <Makefile>` 扫全文 → 误报 FAIL。
+          #   真因：**v1 和 v2 两张 Makefile 里 geoview 的【性质完全不同】**：
+          #
+          #   v1 `luci-app-passwall/Makefile`：
+          #       config PACKAGE_$(PKG_NAME)_INCLUDE_Geoview
+          #           bool "Include Geoview"
+          #           select PACKAGE_geoview                    ← 第 70 行
+          #           default y if aarch64||arm||i386||x86_64
+          #     → 这是【条件 select】，**只在 INCLUDE_Geoview=y 时才触发**。
+          #       我们已在 Load config 收尾把 INCLUDE_Geoview 写死为 n
+          #       → select 不会生效 → **这一行无害，不用改**。
+          #       （注意 `default y if arm` —— C526A 正是 arm，所以默认就是 y！
+          #         这解释了为什么"不写 config 项"压不住，必须显式关。）
+          #
+          #   v2 `luci-app-passwall2/Makefile`：
+          #       LUCI_DEPENDS:=+coreutils ... +lyaml +resolveip +tcping \
+          #           +geoview +v2ray-geoip +v2ray-geosite \        ← 第 28 行
+          #     → 这是【无条件硬依赖】，跟 config 选项无关，**必须 sed 摘掉**
+          #       （Run #9 的 `geoview (no such package): required by:
+          #         luci-app-passwall2-26.9.16-r1[geoview]` 就是它）。
+          #
+          #   ⇒ 所以正确的判据 = 「`LUCI_DEPENDS` 块里不能出现 geoview」，
+          #     而不是「整个文件里不能出现 geoview」。
+          # ================================================================
+          # 抽 LUCI_DEPENDS 块（含反斜杠续行），只看这个块
+          # 注意：用 sed 把 LUCI_DEPENDS 起、到第一个不以 \ 结尾的行为止的块取出来
+          #
+          # ⚠️⚠️ 坑（本轮实测踩到）：**`$(...)` 命令替换会吃掉尾部的所有换行符**，
+          #   所以 `gvlist=$(printf '%s%s\n' "$gvlist" "$MK")` 累积出来的是一整行
+          #   （每个 \n 都被 strip 掉），打印时全部粘连。
+          #   ⇒ 不要在循环里累积"带换行的清单"，改成【先判定、后遍历打印】。
+          GVN=0
+          # 第一遍：只计数
+          for MK in \
+            package/feeds/passwall_luci/luci-app-passwall/Makefile \
+            package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
+            feeds/passwall_luci/luci-app-passwall/Makefile \
+            feeds/passwall2_luci/luci-app-passwall2/Makefile ; do
+            [ -f "$MK" ] || continue
+            if sed -n '/^LUCI_DEPENDS/,/[^\\]$/p' "$MK" | grep -q 'geoview'; then
+              GVN=$((GVN+1))
+            fi
+          done
+          echo "  LUCI_DEPENDS 里仍硬依赖 geoview 的 Makefile 数 = $GVN（必须为 0）"
+          if [ "$GVN" -ne 0 ]; then
+            echo "  !! 下列 Makefile 的 LUCI_DEPENDS 仍写着 geoview"
+            echo "  !! （无条件依赖，会让 apk 在 package/install 报 no such package → Error 4）"
+            # 第二遍：逐个打印（直接 echo，不累积）
+            for MK in \
+              package/feeds/passwall_luci/luci-app-passwall/Makefile \
+              package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
+              feeds/passwall_luci/luci-app-passwall/Makefile \
+              feeds/passwall2_luci/luci-app-passwall2/Makefile ; do
+              [ -f "$MK" ] || continue
+              if sed -n '/^LUCI_DEPENDS/,/[^\\]$/p' "$MK" | grep -q 'geoview'; then
+                echo "    - $MK"
+              fi
+            done
             FAIL=1
           fi
-          echo "  --- 顺带展示四个位置的 LUCI_DEPENDS（便于核对）---"
+          echo "  --- 单纯『文件里出现 geoview』的位置（仅展示；config 段里的"
+          echo "      select PACKAGE_geoview 是无害的，因为 INCLUDE_Geoview 已被关掉）---"
           for MK in \
             package/feeds/passwall_luci/luci-app-passwall/Makefile \
             package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
@@ -595,6 +648,8 @@ jobs:
             feeds/passwall2_luci/luci-app-passwall2/Makefile ; do
             echo "  [ $MK ]"
             if [ -f "$MK" ]; then
+              grep -n 'geoview' "$MK" || echo "    (无 geoview)"
+              echo "    --- LUCI_DEPENDS ---"
               grep -n -A8 '^LUCI_DEPENDS' "$MK" || true
             else
               echo "    (不存在)"

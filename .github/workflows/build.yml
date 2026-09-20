@@ -1,8 +1,8 @@
 # ============================================================================
-# HiWiFi C526A (极路由X) — OpenWrt 24.10 + ipqess + PassWall 自编译
+# HiWiFi C526A (极路由X) — OpenWrt 25.12 + ipqess + PassWall 自编译
 #
 # 两个关键点：
-#  1) REPO_BRANCH 钉死为 openwrt-24.10（不是 master！）
+#  1) REPO_BRANCH 钉死为 openwrt-25.12（不是 master！）
 #     keli 原版模板用 REPO_BRANCH: master，每次跑都 clone 当时的 master，
 #     → 同一仓库不同时间编出的固件内核完全不同。这就是"不同固件行为不同"的根源。
 #  2) PassWall 不在官方 feed，必须加第三方 feed，并且要先删掉官方 feed 里
@@ -12,7 +12,7 @@
 #       然后 Actions → Build C526A → Run workflow
 # ============================================================================
 
-name: Build C526A (OpenWrt 24.10 + ipqess + PassWall)
+name: Build C526A (OpenWrt 25.12 + ipqess + PassWall)
 
 on:
   workflow_dispatch:
@@ -44,10 +44,10 @@ jobs:
             python3-setuptools rsync swig unzip zlib1g-dev file wget ccache \
             libelf-dev python3-pyelftools
 
-      - name: Clone OpenWrt (openwrt-24.10, PINNED)
+      - name: Clone OpenWrt (openwrt-25.12, PINNED)
         run: |
           # ★★★ 分支钉死，不用 master ★★★
-          git clone --depth 1 --branch openwrt-24.10 \
+          git clone --depth 1 --branch openwrt-25.12 \
             https://github.com/openwrt/openwrt.git openwrt
           cd openwrt
           git log --oneline -1
@@ -59,14 +59,14 @@ jobs:
           cd openwrt
           git config user.email "build@c526a.local"
           git config user.name "C526A Build"
-          # 我方移植好的 24.10 版补丁
-          git am --3way "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-24.10.patch" \
+          # 我方移植好的 25.12 版补丁
+          git am --3way "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-25.12.patch" \
             || (echo "=== git am 失败，尝试 apply ==="; \
                 git am --abort 2>/dev/null || true; \
-                git apply --3way -v "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-24.10.patch")
+                git apply --3way -v "$GITHUB_WORKSPACE/0001-Added-support-for-HIWIFI-c526a-25.12.patch")
           # ★ 关键自检：补丁必须真的打上了，否则后面全白跑
           echo "=== 补丁落地自检 ==="
-          test -f target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts \
+          test -f target/linux/ipq40xx/files-6.12/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts \
             || { echo "!! DTS 不存在，补丁没打上"; exit 1; }
           grep -q 'hiwifi_c526a' target/linux/ipq40xx/image/generic.mk \
             || { echo "!! generic.mk 里没有 hiwifi_c526a"; exit 1; }
@@ -92,6 +92,32 @@ jobs:
             >> feeds.conf.default
           echo "=== feeds.conf.default ==="
           cat -A feeds.conf.default
+
+      # ★★★ Pin xray-core 到 v26.7.28 ★★★
+      # 为什么必须 pin：
+      #   passwall_packages feed 是滚动 main，当前 xray-core 是 26.9.9，
+      #   它的 go.mod 要求 go >= 1.27；而 openwrt-25.12 的 golang 是 1.26。
+      #   → 直接用 feed 现状必然报 "requires go >= 1.27 (running go 1.26.x)"。
+      #   v26.7.28 的 go.mod 是 "go 1.26"（无 toolchain 行）→ 正好匹配。
+      # 只改两个变量：PKG_VERSION 和 PKG_HASH（hash 是官方发布页给的 tarball sha256）。
+      - name: Pin xray-core to v26.7.28
+        run: |
+          set -e
+          cd openwrt
+          MK=feeds/passwall_packages/xray-core/Makefile
+          if [ ! -f "$MK" ]; then
+            echo "!! 找不到 $MK —— feeds 结构可能变了，需要人工核对"
+            ls -la feeds/passwall_packages/ | head -40
+            exit 1
+          fi
+          sed -i 's/^PKG_VERSION:=.*/PKG_VERSION:=26.7.28/' "$MK"
+          sed -i 's/^PKG_HASH:=.*/PKG_HASH:=a9afe86349c7bd3e6cae60125e62a5ada09d102e1a2760623e77c24a84dbfb46/' "$MK"
+          echo "=== pin 后的关键行 ==="
+          grep -nE '^(PKG_NAME|PKG_VERSION|PKG_HASH|PKG_SOURCE_URL):=' "$MK"
+          grep -q '^PKG_VERSION:=26.7.28$' "$MK" || { echo "!! PKG_VERSION 没改成 26.7.28"; exit 1; }
+          grep -q '^PKG_HASH:=a9afe86349c7bd3e6cae60125e62a5ada09d102e1a2760623e77c24a84dbfb46$' "$MK" \
+            || { echo "!! PKG_HASH 没改对"; exit 1; }
+          echo "✅ xray-core 已 pin 到 v26.7.28 (go 1.26)"
 
       - name: Update feeds
         run: |
@@ -182,7 +208,7 @@ jobs:
         run: |
           set -e
           cd openwrt
-          cp "$GITHUB_WORKSPACE/config-24.10-c526a" .config
+          cp "$GITHUB_WORKSPACE/config-25.12-c526a" .config
           echo "=== 第一轮 defconfig（解析 select 依赖）==="
           make defconfig
           echo "第一轮 OK, exit=$?"
@@ -275,24 +301,24 @@ jobs:
           grep -A20 'define Device/hiwifi_c526a' target/linux/ipq40xx/image/generic.mk \
             || { echo "!! generic.mk 里没有 Device/hiwifi_c526a"; FAIL=1; }
           echo ""
-          echo "=== files-6.6 DTS（补丁新增）==="
-          ls -la target/linux/ipq40xx/files-6.6/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts \
+          echo "=== files-6.12 DTS（补丁新增）==="
+          ls -la target/linux/ipq40xx/files-6.12/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts \
             || { echo "!! DTS 未落地"; FAIL=1; }
           echo ""
-          echo "=== ipqess 补丁必须存在（上游 24.10 自带，实测 6 个含 ipqess 名）==="
-          if [ ! -d target/linux/ipq40xx/patches-6.6 ]; then
-            echo "!! patches-6.6 目录不存在"; FAIL=1
+          echo "=== ipqess 补丁必须存在（上游 25.12 自带，实测 6 个含 ipqess 名）==="
+          if [ ! -d target/linux/ipq40xx/patches-6.12 ]; then
+            echo "!! patches-6.12 目录不存在"; FAIL=1
           else
-            n=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci ipqess || true)
+            n=$(ls target/linux/ipq40xx/patches-6.12/ | grep -ci ipqess || true)
             echo "ipqess 相关补丁数 = $n（期望 >=6）"
-            ls target/linux/ipq40xx/patches-6.6/ | grep -i ipqess || true
+            ls target/linux/ipq40xx/patches-6.12/ | grep -i ipqess || true
             [ "$n" -ge 6 ] || { echo "!! ipqess 补丁不足"; FAIL=1; }
-            m=$(ls target/linux/ipq40xx/patches-6.6/ | grep -ci essedma || true)
+            m=$(ls target/linux/ipq40xx/patches-6.12/ | grep -ci essedma || true)
             echo "essedma 相关补丁数 = $m（必须为 0）"
             [ "$m" -eq 0 ] || { echo "!! 仍有 essedma 补丁"; FAIL=1; }
             # DSA/switch 侧补丁（文件名不含 ipqess，但同属 ipqess+DSA 方案）
             echo "--- DSA/qca8k/switch 相关补丁（仅展示）---"
-            ls target/linux/ipq40xx/patches-6.6/ | grep -Ei 'dsa|qca8k|switch' || echo "(无)"
+            ls target/linux/ipq40xx/patches-6.12/ | grep -Ei 'dsa|qca8k|switch' || echo "(无)"
           fi
           echo ""
           echo "=== 源码层二次确认：ipqess 源文件在、essedma 源文件不在 ==="
@@ -381,6 +407,27 @@ jobs:
             echo "  OK: geoview 源码目录已移除"
           fi
           echo ""
+          echo "=== ★★ xray-core 必须已 pin 到 v26.7.28（go 1.26）★★ ==="
+          # 背景：feed 滚动的 26.9.9 要 go>=1.27，而 25.12 的 golang 是 1.26 → 必炸。
+          XMK=feeds/passwall_packages/xray-core/Makefile
+          if [ -f "$XMK" ]; then
+            grep -nE '^(PKG_VERSION|PKG_HASH):=' "$XMK" || true
+            if grep -q '^PKG_VERSION:=26\.7\.28$' "$XMK"; then
+              echo "  [OK]   PKG_VERSION = 26.7.28"
+            else
+              echo "  !! PKG_VERSION 不是 26.7.28（会被 go 1.27 要求卡死）"; FAIL=1
+            fi
+          else
+            echo "  !! $XMK 不存在"; FAIL=1
+          fi
+          echo ""
+          echo "=== ★★ golang 工具链版本（25.12 应为 1.26）★★ ==="
+          if [ -d tools/golang ]; then
+            ls tools/golang/ || true
+          fi
+          grep -rhnE '^GO_DEFAULT_VERSION|^GO_VERSION_MAJOR_MINOR' \
+            tools/golang/golang-values.mk tools/golang/golang-version.mk 2>/dev/null || true
+          echo ""
           if [ "$FAIL" -ne 0 ]; then
             echo "!! 自检未通过（见上面 ! 标记），提前失败以便定位"
             exit 1
@@ -446,7 +493,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: c526a-24.10-ipqess-passwall-firmware
+          name: c526a-25.12-ipqess-passwall-firmware
           path: output/
           # ★ 空目录直接失败，不再上传空壳
           if-no-files-found: error

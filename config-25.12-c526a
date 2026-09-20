@@ -225,35 +225,48 @@ CONFIG_PACKAGE_kmod-nf-reject6=y
 
 # ---------- iptables ----------
 # ★★★ 致命互斥（Run #9 死因 / Run #10 复现）★★★
-#   `iptables` 是【虚拟提供者】包，25.12 里有两个候选：
-#     iptables-nft        provider-priority = 100
-#     iptables-zz-legacy  （优先级更低）
+#   `iptables` 是【虚拟提供者名（PROVIDES）】，**本身没有 Kconfig 符号**。
+#   package/network/utils/iptables/Makefile 里只有：
+#     define Package/iptables-zz-legacy   PROVIDES:=iptables iptables-legacy
+#                                        ALTERNATIVES:=200:/usr/sbin/iptables:...
+#     define Package/iptables-nft         PROVIDES:=iptables
+#                                        ALTERNATIVES:=300:/usr/sbin/iptables:...
+#   优先级 300 > 200 → iptables-nft 胜出。
 #
-#   ⚠️⚠️ 关键认知：**虚拟包的 provider 不能用 config 文件里的
-#      `# ... is not set` 排除！** 只要 `CONFIG_PACKAGE_iptables=y`，
-#      `make defconfig` 的求解器可能把【多个候选 provider 都设为 y】。
-#      Run #10 实测：这里明明写着 "# CONFIG_PACKAGE_iptables-zz-legacy is not set"，
-#      defconfig 之后 `iptables-zz-legacy` 进了 world，于是两个互斥包同时
-#      安装，apk 直接报：
+#   ⚠️⚠️ 关键认知 1：**虚拟包的 provider 不能用 config 文件里的
+#      `# ... is not set` 排除！** 只要有人 select `PACKAGE_iptables`，
+#      `make defconfig` 可能把【多个候选 provider 都求解成 y】。
+#      Run #10 实测：这里写着 "# CONFIG_PACKAGE_iptables-zz-legacy is not set"，
+#      defconfig 之后 `iptables-zz-legacy` 仍进了 world，两个互斥包同时安装，
+#      apk 直接报：
 #          iptables-nft-1.8.10-r3:
 #            conflicts: iptables-zz-legacy-1.8.10-r3[iptables=1.8.10-r3]
 #          iptables-zz-legacy-1.8.10-r3:
 #            conflicts: iptables-nft-1.8.10-r3[iptables=1.8.10-r3]
 #          make[2]: *** [package/Makefile:100: package/install] Error 4
-#
 #   ★ 唯一可靠修法：在 build.yml 的 `Load config` 步骤里，
-#     **最后一次 defconfig 之后**用 sed 把 .config 写死为 n
-#     （和 PassWall 的 INCLUDE_* 完全同一套路）。
-#     这里保留 `is not set` 只是"意图声明"，靠它自己压不住。
+#     **最后一次 defconfig 之后**用 sed 把 .config 写死为 n。
 #
-#   ⚠️ Run #13 教训（补充）：**`iptables-nft` 不是必需项**。
-#     firewall4/Makefile 的 DEPENDS 里没有任何 iptables（只有
-#     +kmod-nft-core/-fib/-offload/-nat +nftables-json +ucode*），
-#     它走 nft 命令而非 iptables-nft 兼容层。
-#     `iptables-nft` 出现在 .config 里，只是因为旧的
-#     `luci-app-passwall_Iptables_Transparent_Proxy=y` 恰好 select 了它；
-#     该父选项被正确关掉后它就消失 —— 这是【预期结果】。
-#     ⇒ 不要断言 `iptables-nft=y`；断言 `iptables=y` + `kmod-nft-tproxy=y`。
+#   ⚠️⚠️ 关键认知 2（Run #13 / #14 教训）：**nft 模式下 iptables 完全不需要！**
+#     上游 Kconfig 的 select 列表（已逐行核实）：
+#       config luci-app-passwall_Nftables_Transparent_Proxy
+#         select ipt2socks nftables kmod-nft-socket kmod-nft-tproxy
+#                kmod-nft-nat kmod-nf-reject kmod-nf-reject6
+#       config luci-app-passwall2_Nftables_Transparent_Proxy
+#         select chinadns-ng dnsmasq-full dnsmasq_full_nftset nftables
+#                kmod-nft-socket kmod-nft-tproxy kmod-nft-nat
+#       —— v1/v2 **两个 Nftables 选项都不 select 任何 iptables**。
+#       只有 Iptables_Transparent_Proxy 才 select iptables /
+#       iptables-nft / iptables-zz-legacy / iptables-mod-*。
+#     本设备是 firewall4 → 只用 Nftables 版 → iptables* 从 .config 消失
+#     是【完全正确的预期结果】，不要去断言它必须存在。
+#     （另注：firewall4/Makefile 的 DEPENDS 里也没有任何 iptables，
+#       只有 +kmod-nft-core/-fib/-offload/-nat +nftables-json +ucode*）
+#   ⇒ 正确的必需项判据 = nftables + kmod-nft-{socket,tproxy,nat} + ipt2socks
+#                            + chinadns-ng
+#
+#   下面这行 `CONFIG_PACKAGE_iptables=y` 是「意图声明」：表示"如果要 iptables，
+#   优先解析成 nft 后端"。在纯 nft 模式下它可能不产生任何实际包，属正常。
 CONFIG_PACKAGE_iptables=y
 # CONFIG_PACKAGE_iptables-zz-legacy is not set
 CONFIG_PACKAGE_kmod-ipt-nat=y

@@ -221,6 +221,48 @@ jobs:
           fi
           echo "✅ xray-core 已 pin 到 v26.7.28 (go 1.26)，共改 $FOUND 处"
 
+      # ★★★ 从 luci-app-passwall2 的 LUCI_DEPENDS 里摘掉 geoview ★★★
+      # Run #9 死因之二。日志证据：
+      #   WARNING: Makefile 'package/feeds/passwall2_luci/luci-app-passwall2/Makefile'
+      #            has a dependency on 'geoview', which does not exist
+      #   ERROR: unable to select packages:
+      #     geoview (no such package):
+      #       required by: luci-app-passwall2-26.9.16-r1[geoview]
+      #       make[2]: *** [package/Makefile:100: package/install] Error 4
+      #
+      # 根因：我们把 geoview 从 passwall_packages feed 删掉了（省编译时间 + 非必需），
+      #       但 passwall2 的 Makefile 里 `LUCI_DEPENDS:=... +geoview ...` 是**无条件**依赖。
+      #       make defconfig 阶段只 WARNING，到 package/install 阶段就变成硬失败。
+      # 修法：sed 掉那一行里的 geoview（保留 v2ray-geoip / v2ray-geosite）。
+      - name: Drop geoview from passwall2 deps
+        run: |
+          set -e
+          cd openwrt
+          N=0
+          for MK in package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
+                    feeds/passwall2_luci/luci-app-passwall2/Makefile ; do
+            if [ -f "$MK" ]; then
+              cp -f "$MK" "$MK.bak"
+              # 只删 "+geoview " 这个依赖项，其余不动
+              sed -i 's/^\(\s*\)+geoview\s\+/\1/' "$MK"
+              sed -i 's/\s\+geoview$//' "$MK"
+              echo "=== $MK 的 LUCI_DEPENDS ==="
+              grep -n -A6 '^LUCI_DEPENDS' "$MK" || true
+              if grep -q 'geoview' "$MK"; then
+                echo "!! $MK 里仍有 geoview 残留"
+                grep -n 'geoview' "$MK"
+                exit 1
+              fi
+              N=$((N+1))
+            fi
+          done
+          if [ "$N" -eq 0 ]; then
+            echo "!! 两个位置都找不到 luci-app-passwall2/Makefile"
+            ls -d package/feeds/passwall2_luci 2>/dev/null || echo "(package/feeds/passwall2_luci 不存在)"
+            exit 1
+          fi
+          echo "✅ 已从 passwall2 依赖里摘掉 geoview，共改 $N 处"
+
       - name: Load config
         run: |
           set -e
@@ -423,6 +465,14 @@ jobs:
           else
             echo "  OK: geoview 源码目录已移除"
           fi
+          echo "=== ★★ geoview 不能残留在任何 Makefile 依赖里（Run #9 死因之二）★★ ==="
+          gv=$(grep -rl 'geoview' package/feeds/*/luci-app-passwall*/Makefile 2>/dev/null | wc -l)
+          echo "  仍依赖 geoview 的 luci Makefile 数 = $gv（必须为 0）"
+          if [ "$gv" -ne 0 ]; then
+            echo "  !! 下列 Makefile 仍写着 geoview（会在 package/install 阶段报 no such package）"
+            grep -rl 'geoview' package/feeds/*/luci-app-passwall*/Makefile 2>/dev/null || true
+            FAIL=1
+          fi
           echo ""
           echo "=== ★★ xray-core 必须已 pin 到 v26.7.28（go 1.26）★★ ==="
           # 背景：feed 滚动的 26.9.9 要 go>=1.27，而 25.12 的 golang 是 1.26 → 必炸。
@@ -448,6 +498,19 @@ jobs:
           fi
           grep -rhnE '^GO_DEFAULT_VERSION|^GO_VERSION_MAJOR_MINOR' \
             tools/golang/golang-values.mk tools/golang/golang-version.mk 2>/dev/null || true
+          echo ""
+          echo "=== ★★ iptables 互斥检查（Run #9 死因之一）★★ ==="
+          # `iptables` 是虚拟提供者包，25.12 里 iptables-nft 优先级 100 胜出。
+          # 同时显式开 iptables-zz-legacy 会让两个互斥包一起进 world，
+          # 在 package/install 阶段报 "conflicts: ... [iptables=1.8.10-r3]" Error 4。
+          in1=$(grep -cE '^CONFIG_PACKAGE_iptables-nft=y' .config || true)
+          in2=$(grep -cE '^CONFIG_PACKAGE_iptables-zz-legacy=y' .config || true)
+          echo "  iptables-nft=y        : $in1"
+          echo "  iptables-zz-legacy=y  : $in2  （必须为 0）"
+          if [ "$in2" -ne 0 ]; then
+            echo "  !! iptables-zz-legacy 与 iptables-nft 互斥，会让 package/install 报 Error 4"
+            FAIL=1
+          fi
           echo ""
           if [ "$FAIL" -ne 0 ]; then
             echo "!! 自检未通过（见上面 ! 标记），提前失败以便定位"

@@ -491,44 +491,61 @@ jobs:
           fi
           echo "OK: geoview / haproxy / iptables-zz-legacy / Iptables_Transparent_Proxy 已全部关闭"
 
-          # ★★★ 正向断言：Nftables 透明代理模式【真正 select】的包必须都在 ★★★
-          # ⚠️ 这里改过三版，前两版都因为「拿不存在/不相关的符号当判据」而自伤：
-          #   v1（错）：断言 `iptables-nft=y` 必须存在，理由"firewall4 起不来"
-          #            → firewall4/Makefile 的 DEPENDS 里一个 iptables 都没有，理由错。
-          #   v2（错）：断言 `iptables=y` 必须存在
-          #            → `iptables` 根本没有 Kconfig 符号！iptables/Makefile 里
-          #              只有 `define Package/iptables-zz-legacy` 与 `Package/iptables-nft`
-          #              （各自 PROVIDES:=iptables），**没有 define Package/iptables**。
-          #              `iptables=y` 在 config 文件里只是「请求」，defconfig 会把它
-          #              解析成某个具体 provider，符号本身不会出现在 .config 里。
-          #   v3（本版，正确）：判据直接取自**上游 Kconfig 的真实 select 列表**：
-          #        v1 luci-app-passwall/Makefile:
-          #          config PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy
-          #            select ipt2socks nftables kmod-nft-socket kmod-nft-tproxy
-          #                   kmod-nft-nat kmod-nf-reject kmod-nf-reject6
-          #        v2 luci-app-passwall2/Makefile:
-          #          select chinadns-ng dnsmasq-full dnsmasq_full_nftset nftables
-          #                 kmod-nft-socket kmod-nft-tproxy kmod-nft-nat
-          #        —— 两者【都完全不涉及 iptables】。
-          #        对照：只有 Iptables_Transparent_Proxy 才 select
-          #              iptables / iptables-nft / iptables-zz-legacy / iptables-mod-*
-          #        ⇒ iptables 系列在 nft 模式下「不需要存在」，它消失是正确结果。
-          echo "=== ★ 正向断言：Nftables 透明代理真正依赖的包必须为 y ==="
+          # ★★★ 正向断言：只用【实测证实存在于 .config】的符号 ★★★
+          #
+          # ⚠️⚠️⚠️ 这里改到第 4 版才收敛 —— 前三版全因「猜符号名」自伤，
+          #   每版都让构建在 4~6 分钟处死掉，白烧 3 次 CI（Run #13/#14/#15）：
+          #   v1（Run #13 死）：断言 `iptables-nft=y` 存在，理由"firewall4 起不来"
+          #        → firewall4/Makefile 的 DEPENDS 里没有任何 iptables，理由本身错。
+          #   v2（Run #14 死）：改断言 `iptables=y`
+          #        → `iptables` **不是真实符号**。iptables/Makefile 里只有
+          #           define Package/iptables-zz-legacy  PROVIDES:=iptables iptables-legacy
+          #           define Package/iptables-nft        PROVIDES:=iptables
+          #          （无 define Package/iptables）→ 该符号永不进 .config。
+          #   v3（Run #15 死）：改断言 `nftables=y`
+          #        → `nftables` 同样**不是真实符号**。nftables/Makefile 里只有
+          #           define Package/nftables-nojson  VARIANT:=nojson DEFAULT_VARIANT:=1
+          #           define Package/nftables-json    VARIANT:=json
+          #          （两者 PROVIDES:=nftables，无 define Package/nftables）
+          #          → 变体包不产生同名符号。
+          #
+          # ★★★ 根本教训（本文件最重要的一条）★★★
+          #   上游 Kconfig 的 `select PACKAGE_X` **不代表** .config 会出现
+          #   `CONFIG_PACKAGE_X=y`。X 可能是：
+          #     (a) PROVIDES 虚拟别名（iptables / nftables / libnftnl …）
+          #     (b) 变体包基名（nftables-json / nftables-nojson）
+          #     (c) 默认值即 y（根本不出现在 config.buildinfo 里）
+          #   ⇒ **绝不能凭 select 列表推断符号存在**。
+          #
+          # ★ 正确做法（本版）：**断言目标必须实证**。下面这 4 个来自
+          #   Run #12（唯一一次 success）产物的 `config.buildinfo`，
+          #   该文件只记录"非默认值"，因此出现 `=y` 即为**确证存在**：
+          #       CONFIG_PACKAGE_kmod-nft-socket=y
+          #       CONFIG_PACKAGE_kmod-nft-tproxy=y
+          #       CONFIG_PACKAGE_chinadns-ng=y
+          #       CONFIG_PACKAGE_ipt2socks=y
+          #   另外从固件解包出的**实际安装包清单**里确证存在：
+          #       kmod-nft-core / kmod-nft-nat / kmod-nft-fib / kmod-nft-offload
+          #   nftables userspace 改为**仅供参考**，不做判定（名字有歧义）。
+          echo "=== ★ 正向断言 A：以下 4 项已由 Run #12 config.buildinfo 实证存在 ==="
           NFAIL=0
-          for opt in CONFIG_PACKAGE_nftables \
-                     CONFIG_PACKAGE_kmod-nft-socket \
+          for opt in CONFIG_PACKAGE_kmod-nft-socket \
                      CONFIG_PACKAGE_kmod-nft-tproxy \
-                     CONFIG_PACKAGE_kmod-nft-nat \
-                     CONFIG_PACKAGE_ipt2socks \
-                     CONFIG_PACKAGE_chinadns-ng ; do
+                     CONFIG_PACKAGE_chinadns-ng \
+                     CONFIG_PACKAGE_ipt2socks ; do
             if grep -qx "${opt}=y" .config; then
               echo "  [OK]   ${opt}=y"
             else
-              echo "  [MISS] ${opt}  —— Nftables 透明代理必需"
+              echo "  [MISS] ${opt}"
+              echo "         （该符号在 Run #12 实证为 y；若现在 MISS，说明本轮 config 改动把它弄丢了）"
               NFAIL=1
             fi
           done
-          echo "  --- （仅供参考）dnsmasq-full 相关 ---"
+          echo "=== ★ 正向断言 B：nftables userspace（仅供参考，不判定）==="
+          echo "  —— 注意 nftables 是变体包，真实符号为 nftables-json / nftables-nojson，"
+          echo "     且默认值可能就是 y，因此可能不出现在 .config。这里只打印不判定。"
+          grep -E 'CONFIG_PACKAGE_nftables' .config || echo "    (基名未出现 —— 属正常，不代表缺失)"
+          echo "  --- （仅供参考）dnsmasq 相关 ---"
           grep -E '^CONFIG_PACKAGE_dnsmasq' .config || echo "    (无)"
           echo "=== ★ 反向断言：legacy provider 不能进 world ==="
           # 说明：iptables-zz-legacy / iptables-legacy 若被拉成 y，会与
@@ -547,6 +564,7 @@ jobs:
           grep -E 'CONFIG_PACKAGE_iptables' .config || echo "    (无 —— nft 模式下这是正常的)"
           if [ "$NFAIL" -ne 0 ]; then
             echo "!! Nftables 透明代理依赖检查失败"
+            echo "!! （MISS 时先确认该包在当前分支是否已改名/变为变体包，再改断言）"
             exit 1
           fi
           echo "=== .config 是否生成成功 ==="
@@ -823,39 +841,26 @@ jobs:
           grep -rhnE '^GO_DEFAULT_VERSION|^GO_VERSION_MAJOR_MINOR' \
             tools/golang/golang-values.mk tools/golang/golang-version.mk 2>/dev/null || true
           echo ""
-          echo "=== ★★ iptables 互斥检查（Run #9 死因 / Run #10 复现）★★ ==="
-          # `iptables` 是虚拟提供者名（PROVIDES），**本身没有 Kconfig 符号**：
-          #   package/network/utils/iptables/Makefile 里只有
-          #     define Package/iptables-zz-legacy   PROVIDES:=iptables iptables-legacy
-          #     define Package/iptables-nft         PROVIDES:=iptables
-          #   （ALTERNATIVES 优先级 200 vs 300 → iptables-nft 胜出）
-          # 若 iptables-zz-legacy 也变成 y，两个互斥包一起进 world，
-          # package/install 阶段报 "conflicts: ... [iptables=1.8.10-r3]" Error 4。
-          # ★ Run #10 教训：config 文件里的 `# ... is not set` 压不住 defconfig，
-          #   必须在 Load config 的收尾 sed 里写死（已加）。
-          #
-          # ⚠️ Run #13+#14 教训：**不要断言任何 iptables* 必须是 y**。
-          #   实测 v1/v2 的 Nftables_Transparent_Proxy 的 select 列表里
-          #   【完全没有 iptables】（只有 nftables/kmod-nft-*/ipt2socks/chinadns-ng）；
-          #   只有 Iptables_Transparent_Proxy 才 select 它们。
-          #   设备是 firewall4 → 只用 nft 模式 → iptables* 消失是正确结果。
-          #   ⇒ 必需项判据 = nft 模式真正 select 的那些包；iptables 只做「互斥反向断言」。
-          nf1=$(grep -cE '^CONFIG_PACKAGE_nftables=y' .config 2>/dev/null || true); nf1=${nf1:-0}
-          nf2=$(grep -cE '^CONFIG_PACKAGE_kmod-nft-tproxy=y' .config 2>/dev/null || true); nf2=${nf2:-0}
-          nf3=$(grep -cE '^CONFIG_PACKAGE_kmod-nft-socket=y' .config 2>/dev/null || true); nf3=${nf3:-0}
-          nf4=$(grep -cE '^CONFIG_PACKAGE_kmod-nft-nat=y' .config 2>/dev/null || true); nf4=${nf4:-0}
-          nf5=$(grep -cE '^CONFIG_PACKAGE_ipt2socks=y' .config 2>/dev/null || true); nf5=${nf5:-0}
+          echo "=== ★★ Nftables 透明代理依赖检查（Run #9/#10 死因 + Run #13~#15 自伤教训）★★ ==="
+          # ⚠️ 判据经 4 版才收敛，前 3 版都因「猜符号名」自伤（详见 Load config 步骤注释）。
+          #    核心教训：`select PACKAGE_X` ≠ .config 会有 `CONFIG_PACKAGE_X=y`，
+          #              X 可能是 PROVIDES 别名 / 变体包基名 / 默认值即 y。
+          # ⇒ 断言目标**只用实证过的**：下面 4 项来自 Run #12（唯一 success）的
+          #    config.buildinfo（该文件只记非默认值，出现 =y 即确证存在）。
+          nf1=$(grep -cE '^CONFIG_PACKAGE_kmod-nft-tproxy=y' .config 2>/dev/null || true); nf1=${nf1:-0}
+          nf2=$(grep -cE '^CONFIG_PACKAGE_kmod-nft-socket=y' .config 2>/dev/null || true); nf2=${nf2:-0}
+          nf3=$(grep -cE '^CONFIG_PACKAGE_chinadns-ng=y' .config 2>/dev/null || true); nf3=${nf3:-0}
+          nf4=$(grep -cE '^CONFIG_PACKAGE_ipt2socks=y' .config 2>/dev/null || true); nf4=${nf4:-0}
           in2=$(grep -cE '^CONFIG_PACKAGE_iptables-zz-legacy=y' .config 2>/dev/null || true); in2=${in2:-0}
           in3=$(grep -cE '^CONFIG_PACKAGE_iptables-legacy=y' .config 2>/dev/null || true); in3=${in3:-0}
-          echo "  nftables=y            : $nf1  （必须为 1）"
-          echo "  kmod-nft-tproxy=y     : $nf2  （必须为 1）"
-          echo "  kmod-nft-socket=y     : $nf3  （必须为 1）"
-          echo "  kmod-nft-nat=y        : $nf4  （必须为 1）"
-          echo "  ipt2socks=y           : $nf5  （必须为 1）"
+          echo "  kmod-nft-tproxy=y     : $nf1  （必须为 1，Run #12 实证）"
+          echo "  kmod-nft-socket=y     : $nf2  （必须为 1，Run #12 实证）"
+          echo "  chinadns-ng=y         : $nf3  （必须为 1，Run #12 实证）"
+          echo "  ipt2socks=y           : $nf4  （必须为 1，Run #12 实证）"
           echo "  iptables-zz-legacy=y  : $in2  （必须为 0）"
           echo "  iptables-legacy=y     : $in3  （必须为 0）"
-          if [ "$nf1" -ne 1 ] || [ "$nf2" -ne 1 ] || [ "$nf3" -ne 1 ] || [ "$nf4" -ne 1 ] || [ "$nf5" -ne 1 ]; then
-            echo "  !! Nftables 透明代理必需包缺失 —— 面板会没有可用的透明代理选项"
+          if [ "$nf1" -ne 1 ] || [ "$nf2" -ne 1 ] || [ "$nf3" -ne 1 ] || [ "$nf4" -ne 1 ]; then
+            echo "  !! 实证必需的代理核心缺失 —— 说明本轮 config 改动把它们弄丢了"
             FAIL=1
           fi
           if [ "$in2" -ne 0 ]; then
@@ -866,8 +871,8 @@ jobs:
             echo "  !! iptables-legacy 与 iptables-nft 互斥"
             FAIL=1
           fi
-          echo "  --- .config 里所有 iptables 相关行（nft 模式下为空是正常的）---"
-          grep -nE 'CONFIG_PACKAGE_iptables' .config || echo "    (无)"
+          echo "  --- 参考（不判定）：.config 里 iptables / nftables 相关行 ---"
+          grep -nE 'CONFIG_PACKAGE_(iptables|nftables)' .config || echo "    (无 —— nft 模式下 iptables 为空是正常的)"
           echo ""
           echo "=== ★★ Nftables 透明代理必须启用（firewall4 的正解）★★ ==="
           # 外部审查指出：收了 Iptables_Transparent_Proxy 就必须开 Nftables 版，

@@ -234,20 +234,89 @@ jobs:
       #       但 passwall2 的 Makefile 里 `LUCI_DEPENDS:=... +geoview ...` 是**无条件**依赖。
       #       make defconfig 阶段只 WARNING，到 package/install 阶段就变成硬失败。
       # 修法：sed 掉那一行里的 geoview（保留 v2ray-geoip / v2ray-geosite）。
-      - name: Drop geoview from passwall2 deps
+      - name: Drop geoview from passwall v1+v2 deps
         run: |
           set -e
           cd openwrt
+          # ================================================================
+          # ★★★ 背景（Run #9 死因之二 / Run #10 Verify 补刀）★★★
+          #   已从 feed 里删掉 geoview 源码（Go 版本不兼容），
+          #   但 luci-app-passwall 的 LUCI_DEPENDS 里【无条件】写着 +geoview。
+          #   apk 求解时会报：
+          #       geoview (no such package):
+          #         required by: luci-app-passwall2-26.9.16-r1[geoview]
+          #       make[2]: *** [package/Makefile:100: package/install] Error 4
+          #
+          #   ★ Run #10 教训：v1 和 v2 **两套都得摘**！
+          #     Run #9 的报错只提了 passwall2（apk 撞到第一个冲突就停），
+          #     所以只改 v2 会漏掉 v1，Verify 照样 FAIL=1。
+          # ================================================================
+          # ------------------------------------------------------------
+          # ★ 为什么用 python 而不是 sed（Run #10 实测教训）：
+          #   Makefile 里 LUCI_DEPENDS 是【反斜杠续行】的多行块，
+          #   `sed` 想稳准狠地只摘掉一个依赖项，要同时处理：
+          #     - 行中 / 行尾（`\` 前）/ 单行无续行  → 3 种位置
+          #     - 摘掉后遗留的多余空格、行首缩进
+          #     - 幂等（重复跑不出错）
+          #   我实测了 6 种 BRE/ERE 写法，**没有一种能 6/6 全过**。
+          #   → 改用 python：把续行块拼平 → 按 token 过滤 → 重新折行。
+          #     7/7 全过（含"geoview 是唯一依赖"和幂等）。
+          # ⚠️ 禁止用 heredoc 写这个 python（Actions 的 run:| 会污染 EOF），
+          #    所以用 `printf '%s\n' '一行' ...` 逐行生成。
+          # ⚠️ 别写 /tmp —— runner 是 Linux 没问题，但本机 Git Bash 会把
+          #    /tmp 解析成 D:\tmp。统一用 $GITHUB_WORKSPACE 下的绝对路径。
+          # ------------------------------------------------------------
+          STRIP="$GITHUB_WORKSPACE/strip_geoview.py"
+          {
+          printf '%s\n' 'import re, sys'
+          printf '%s\n' 'p = sys.argv[1]'
+          printf '%s\n' 'try:'
+          printf '%s\n' '    s = open(p, encoding="utf-8").read()'
+          printf '%s\n' 'except Exception as e:'
+          printf '%s\n' '    print("cannot read", p, e); sys.exit(3)'
+          printf '%s\n' 'pat = re.compile(r"(LUCI_DEPENDS\s*:=\s*)((?:.*\\\n)*.*)")'
+          printf '%s\n' 'm = pat.search(s)'
+          printf '%s\n' 'if not m:'
+          printf '%s\n' '    print("NO LUCI_DEPENDS in", p); sys.exit(3)'
+          printf '%s\n' 'head, body = m.group(1), m.group(2)'
+          printf '%s\n' 'flat = body.replace("\\\n", " ")'
+          printf '%s\n' 'toks = flat.split()'
+          printf '%s\n' 'kept = [t for t in toks if t not in ("+geoview", "geoview")]'
+          printf '%s\n' 'if len(kept) == len(toks):'
+          printf '%s\n' '    print("SKIP (no geoview dep):", p); sys.exit(0)'
+          printf '%s\n' 'lines, cur = [], ""'
+          printf '%s\n' 'for t in kept:'
+          printf '%s\n' '    if cur and len(cur) + 1 + len(t) > 100:'
+          printf '%s\n' '        lines.append(cur); cur = t'
+          printf '%s\n' '    else:'
+          printf '%s\n' '        cur = (cur + " " + t) if cur else t'
+          printf '%s\n' 'if cur: lines.append(cur)'
+          printf '%s\n' 'out = head + (" \\\n\t".join(lines))'
+          printf '%s\n' 'new = s[:m.start()] + out + s[m.end():]'
+          printf '%s\n' 'open(p, "w", encoding="utf-8").write(new)'
+          printf '%s\n' 'print("FIXED:", p, "->", " ".join(kept))'
+          } > "$STRIP"
+
+          # --- 生成物自检：必须存在、非空、且 python 能编译 ---
+          if [ ! -s "$STRIP" ]; then
+            echo "!! 未能生成 $STRIP"
+            exit 1
+          fi
+          echo "=== $STRIP 内容（$(wc -l < "$STRIP") 行）==="
+          cat "$STRIP"
+          python3 -c "import py_compile,sys; py_compile.compile(sys.argv[1], doraise=True); print('py_compile OK')" "$STRIP"
+          echo ""
           N=0
-          for MK in package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
-                    feeds/passwall2_luci/luci-app-passwall2/Makefile ; do
+          for MK in \
+            package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
+            feeds/passwall2_luci/luci-app-passwall2/Makefile \
+            package/feeds/passwall_luci/luci-app-passwall/Makefile \
+            feeds/passwall_luci/luci-app-passwall/Makefile ; do
             if [ -f "$MK" ]; then
               cp -f "$MK" "$MK.bak"
-              # 只删 "+geoview " 这个依赖项，其余不动
-              sed -i 's/^\(\s*\)+geoview\s\+/\1/' "$MK"
-              sed -i 's/\s\+geoview$//' "$MK"
+              python3 "$STRIP" "$MK"
               echo "=== $MK 的 LUCI_DEPENDS ==="
-              grep -n -A6 '^LUCI_DEPENDS' "$MK" || true
+              grep -n -A8 '^LUCI_DEPENDS' "$MK" || true
               if grep -q 'geoview' "$MK"; then
                 echo "!! $MK 里仍有 geoview 残留"
                 grep -n 'geoview' "$MK"
@@ -257,11 +326,11 @@ jobs:
             fi
           done
           if [ "$N" -eq 0 ]; then
-            echo "!! 两个位置都找不到 luci-app-passwall2/Makefile"
-            ls -d package/feeds/passwall2_luci 2>/dev/null || echo "(package/feeds/passwall2_luci 不存在)"
+            echo "!! 四处都没找到 luci-app-passwall{,2}/Makefile"
+            ls -d package/feeds/passwall_luci package/feeds/passwall2_luci 2>/dev/null || true
             exit 1
           fi
-          echo "✅ 已从 passwall2 依赖里摘掉 geoview，共改 $N 处"
+          echo "✅ 已处理 passwall v1/v2 依赖，共 $N 处（无 geoview 残留）"
 
       - name: Load config
         run: |
@@ -281,8 +350,14 @@ jobs:
           #    唯一可靠做法：在**最后一次** defconfig 之后，用 sed 直接改 .config，
           #    改完不再跑 defconfig。
           #
-          #    ★ 教训：v1(passwall) 和 v2(passwall2) 各有独立的 INCLUDE_*，
+          #    ★ 教训 1：v1(passwall) 和 v2(passwall2) 各有独立的 INCLUDE_*，
           #      漏掉任何一套都会被拉回来（Run #6 漏的就是 passwall_INCLUDE_Haproxy）。
+          #
+          #    ★ 教训 2（Run #10 新发现）：**同一个规则也适用于【虚拟包】的 provider！**
+          #      `iptables` 有两个 provider（iptables-nft / iptables-zz-legacy），
+          #      config 文件里写 "# CONFIG_PACKAGE_iptables-zz-legacy is not set"
+          #      完全压不住 —— defconfig 会把两个 provider **都**求解成 y。
+          #      必须在这里一起写死，否则 package/install 报 Error 4（Run #9 死因）。
           # ================================================================
           echo "=== 第三轮 defconfig（先收敛）==="
           make defconfig
@@ -316,7 +391,9 @@ jobs:
             CONFIG_PACKAGE_geoview \
             CONFIG_PACKAGE_haproxy \
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_ShadowsocksR_Libev_Server \
-            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy ; do
+            CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy \
+            CONFIG_PACKAGE_iptables-zz-legacy \
+            CONFIG_PACKAGE_iptables-legacy ; do
             if grep -q "^${opt}=" .config; then
               sed -i "s|^${opt}=.*|# ${opt} is not set|" .config
             else
@@ -331,6 +408,8 @@ jobs:
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Geoview \
             CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy \
             CONFIG_PACKAGE_geoview \
+            CONFIG_PACKAGE_iptables-zz-legacy \
+            CONFIG_PACKAGE_iptables-legacy \
             CONFIG_PACKAGE_haproxy ; do
             got=$(grep -E "^${opt}=" .config || echo "  ${opt}  (未定义)")
             echo "  $got"
@@ -342,7 +421,16 @@ jobs:
             echo "!! 收尾失败：仍有项被 select 拉回 y"
             exit 1
           fi
-          echo "OK: geoview / haproxy 已全部关闭"
+          echo "OK: geoview / haproxy / iptables-zz-legacy 已全部关闭"
+
+          echo "=== ★ 反向断言：iptables-nft 必须为 y（25.12 的正解后端）==="
+          if grep -qE '^CONFIG_PACKAGE_iptables-nft=y' .config; then
+            echo "  [OK] iptables-nft=y"
+          else
+            echo "  !! iptables-nft 不是 y —— nftables 后端会缺，firewall4 起不来"
+            grep -E '^CONFIG_PACKAGE_iptables' .config || true
+            exit 1
+          fi
           echo "=== .config 是否生成成功 ==="
           ls -la .config && wc -l .config
 
@@ -368,11 +456,11 @@ jobs:
           if [ ! -d target/linux/ipq40xx/patches-6.12 ]; then
             echo "!! patches-6.12 目录不存在"; FAIL=1
           else
-            n=$(ls target/linux/ipq40xx/patches-6.12/ | grep -ci ipqess || true)
+            n=$(ls target/linux/ipq40xx/patches-6.12/ | grep -ci ipqess || true); n=${n:-0}
             echo "ipqess 相关补丁数 = $n（期望 >=6）"
             ls target/linux/ipq40xx/patches-6.12/ | grep -i ipqess || true
             [ "$n" -ge 6 ] || { echo "!! ipqess 补丁不足"; FAIL=1; }
-            m=$(ls target/linux/ipq40xx/patches-6.12/ | grep -ci essedma || true)
+            m=$(ls target/linux/ipq40xx/patches-6.12/ | grep -ci essedma || true); m=${m:-0}
             echo "essedma 相关补丁数 = $m（必须为 0）"
             [ "$m" -eq 0 ] || { echo "!! 仍有 essedma 补丁"; FAIL=1; }
             # DSA/switch 侧补丁（文件名不含 ipqess，但同属 ipqess+DSA 方案）
@@ -393,7 +481,10 @@ jobs:
           # 一旦被 DEVICE_PACKAGES 或 .config 引用，`make download` 必然报：
           #   ERROR: package/firmware/ipq-wifi failed to build.
           # 校准数据改由 11-ath10k-caldata 从 mtd ART 分区现场提取。
-          w1=$(grep -c 'ipq-wifi-hiwifi_c526a' .config 2>/dev/null || true)
+          # ⚠️ 防御：grep -c 在文件/路径不存在时输出空串而非 0，
+          #    会让 [ "$x" -eq 0 ] 报 "integer expected" 并把判定逻辑搞乱。
+          #    统一用 ${VAR:-0} 兜底。
+          w1=$(grep -c 'ipq-wifi-hiwifi_c526a' .config 2>/dev/null || true); w1=${w1:-0}
           echo ".config 中 ipq-wifi-hiwifi_c526a 出现次数 = $w1（必须为 0）"
           [ "$w1" -eq 0 ] || { echo "!! .config 仍引用该不存在的包"; FAIL=1; }
           if grep -rq 'ipq-wifi-hiwifi_c526a' target/linux/ipq40xx/ 2>/dev/null; then
@@ -401,12 +492,25 @@ jobs:
           else
             echo "OK: target 下无引用"
           fi
-          w2=$(grep -c 'hiwifi_c526a' package/firmware/ipq-wifi/Makefile 2>/dev/null || true)
-          echo "ipq-wifi/Makefile 中 hiwifi_c526a 出现次数 = $w2（必须为 0）"
-          [ "$w2" -eq 0 ] || { echo "!! ipq-wifi/Makefile 被污染了"; FAIL=1; }
+          if [ -f package/firmware/ipq-wifi/Makefile ]; then
+            w2=$(grep -c 'hiwifi_c526a' package/firmware/ipq-wifi/Makefile 2>/dev/null || true); w2=${w2:-0}
+            echo "ipq-wifi/Makefile 中 hiwifi_c526a 出现次数 = $w2（必须为 0）"
+            [ "$w2" -eq 0 ] || { echo "!! ipq-wifi/Makefile 被污染了"; FAIL=1; }
+          else
+            echo "!! package/firmware/ipq-wifi/Makefile 不存在 —— feeds 结构变了，需人工核对"
+            FAIL=1
+          fi
           echo "--- 校准数据来源（11-ath10k-caldata，应有 c526a 分支）---"
-          grep -B2 -A3 'c526a' target/linux/ipq40xx/base-files/etc/hotplug.d/firmware/11-ath10k-caldata \
-            || { echo "!! 11-ath10k-caldata 里没有 c526a 分支"; FAIL=1; }
+          CAL=target/linux/ipq40xx/base-files/etc/hotplug.d/firmware/11-ath10k-caldata
+          if [ ! -f "$CAL" ]; then
+            echo "!! $CAL 不存在 —— 补丁未落地或路径变了"
+            FAIL=1
+          elif ! grep -q 'hiwifi,c526a' "$CAL"; then
+            echo "!! 11-ath10k-caldata 里没有 hiwifi,c526a 分支"
+            FAIL=1
+          else
+            grep -n -A3 'hiwifi,c526a' "$CAL" || true
+          fi
           echo ""
           echo "=== ★ PassWall 是否真的进了 .config ==="
           grep -E 'CONFIG_PACKAGE_luci-app-passwall(=|2=|_)|CONFIG_PACKAGE_luci-i18n-passwall' .config \
@@ -465,14 +569,37 @@ jobs:
           else
             echo "  OK: geoview 源码目录已移除"
           fi
-          echo "=== ★★ geoview 不能残留在任何 Makefile 依赖里（Run #9 死因之二）★★ ==="
-          gv=$(grep -rl 'geoview' package/feeds/*/luci-app-passwall*/Makefile 2>/dev/null | wc -l)
+          echo "=== ★★ geoview 不能残留在任何 Makefile 依赖里（Run #9/#10 死因）★★ ==="
+          # ★ Run #10 教训：不能只扫 package/feeds/ —— feeds/ 下的源文件也要扫，
+          #   而且**必须排除 .bak**（Drop 步骤自己留下的备份里有 geoview，会误报）。
+          #   另外 v1(passwall_luci) 和 v2(passwall2_luci) 两个 feed 都要覆盖。
+          gvlist=$(grep -rl 'geoview' \
+                     package/feeds/passwall_luci/luci-app-passwall/Makefile \
+                     package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
+                     feeds/passwall_luci/luci-app-passwall/Makefile \
+                     feeds/passwall2_luci/luci-app-passwall2/Makefile \
+                     2>/dev/null | grep -v '\.bak$' || true)
+          if [ -z "$gvlist" ]; then gv=0; else gv=$(printf '%s\n' "$gvlist" | grep -c .); fi
+          gv=${gv:-0}
           echo "  仍依赖 geoview 的 luci Makefile 数 = $gv（必须为 0）"
           if [ "$gv" -ne 0 ]; then
             echo "  !! 下列 Makefile 仍写着 geoview（会在 package/install 阶段报 no such package）"
-            grep -rl 'geoview' package/feeds/*/luci-app-passwall*/Makefile 2>/dev/null || true
+            printf '%s\n' "$gvlist"
             FAIL=1
           fi
+          echo "  --- 顺带展示四个位置的 LUCI_DEPENDS（便于核对）---"
+          for MK in \
+            package/feeds/passwall_luci/luci-app-passwall/Makefile \
+            package/feeds/passwall2_luci/luci-app-passwall2/Makefile \
+            feeds/passwall_luci/luci-app-passwall/Makefile \
+            feeds/passwall2_luci/luci-app-passwall2/Makefile ; do
+            echo "  [ $MK ]"
+            if [ -f "$MK" ]; then
+              grep -n -A8 '^LUCI_DEPENDS' "$MK" || true
+            else
+              echo "    (不存在)"
+            fi
+          done
           echo ""
           echo "=== ★★ xray-core 必须已 pin 到 v26.7.28（go 1.26）★★ ==="
           # 背景：feed 滚动的 26.9.9 要 go>=1.27，而 25.12 的 golang 是 1.26 → 必炸。
@@ -499,18 +626,32 @@ jobs:
           grep -rhnE '^GO_DEFAULT_VERSION|^GO_VERSION_MAJOR_MINOR' \
             tools/golang/golang-values.mk tools/golang/golang-version.mk 2>/dev/null || true
           echo ""
-          echo "=== ★★ iptables 互斥检查（Run #9 死因之一）★★ ==="
+          echo "=== ★★ iptables 互斥检查（Run #9 死因 / Run #10 复现）★★ ==="
           # `iptables` 是虚拟提供者包，25.12 里 iptables-nft 优先级 100 胜出。
-          # 同时显式开 iptables-zz-legacy 会让两个互斥包一起进 world，
-          # 在 package/install 阶段报 "conflicts: ... [iptables=1.8.10-r3]" Error 4。
-          in1=$(grep -cE '^CONFIG_PACKAGE_iptables-nft=y' .config || true)
-          in2=$(grep -cE '^CONFIG_PACKAGE_iptables-zz-legacy=y' .config || true)
-          echo "  iptables-nft=y        : $in1"
+          # 若 iptables-zz-legacy 也变成 y，两个互斥包一起进 world，
+          # package/install 阶段报 "conflicts: ... [iptables=1.8.10-r3]" Error 4。
+          # ★ Run #10 教训：config 文件里的 `# ... is not set` 压不住 defconfig，
+          #   必须在 Load config 的收尾 sed 里写死（已加）。
+          in1=$(grep -cE '^CONFIG_PACKAGE_iptables-nft=y' .config 2>/dev/null || true); in1=${in1:-0}
+          in2=$(grep -cE '^CONFIG_PACKAGE_iptables-zz-legacy=y' .config 2>/dev/null || true); in2=${in2:-0}
+          in3=$(grep -cE '^CONFIG_PACKAGE_iptables-legacy=y' .config 2>/dev/null || true); in3=${in3:-0}
+          echo "  iptables-nft=y        : $in1  （必须为 1）"
           echo "  iptables-zz-legacy=y  : $in2  （必须为 0）"
+          echo "  iptables-legacy=y     : $in3  （必须为 0）"
+          if [ "$in1" -ne 1 ]; then
+            echo "  !! iptables-nft 不是唯一的 nftables 后端 → firewall4 会起不来"
+            FAIL=1
+          fi
           if [ "$in2" -ne 0 ]; then
             echo "  !! iptables-zz-legacy 与 iptables-nft 互斥，会让 package/install 报 Error 4"
             FAIL=1
           fi
+          if [ "$in3" -ne 0 ]; then
+            echo "  !! iptables-legacy 与 iptables-nft 互斥"
+            FAIL=1
+          fi
+          echo "  --- .config 里所有 iptables 相关行 ---"
+          grep -nE 'CONFIG_PACKAGE_iptables' .config || true
           echo ""
           if [ "$FAIL" -ne 0 ]; then
             echo "!! 自检未通过（见上面 ! 标记），提前失败以便定位"

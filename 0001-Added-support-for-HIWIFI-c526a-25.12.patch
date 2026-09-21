@@ -2,12 +2,16 @@ diff --git a/target/linux/ipq40xx/base-files/etc/board.d/02_network b/target/lin
 index 525e4d8..f2daa1a 100644
 --- a/target/linux/ipq40xx/base-files/etc/board.d/02_network
 +++ b/target/linux/ipq40xx/base-files/etc/board.d/02_network
-@@ -52,6 +52,9 @@ ipq40xx_setup_interfaces()
+@@ -52,6 +52,13 @@ ipq40xx_setup_interfaces()
  	zte,mf289f)
  		ucidef_set_interfaces_lan_wan "lan" "wan"
  		;;
 +	hiwifi,c526a)
 +		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "wan"
++		lan_mac=$(mtd_get_mac_ascii bdinfo "Vfac_mac ")
++		wan_mac=$(macaddr_add "$lan_mac" 1)
++		[ -n "$lan_mac" ] && ucidef_set_interface_macaddr "lan" "$lan_mac"
++		[ -n "$wan_mac" ] && ucidef_set_interface_macaddr "wan" "$wan_mac"
 +		;;
  	aruba,ap-303|\
  	aruba,ap-365|\
@@ -496,3 +500,4 @@ index 4e155a3..3e11d0d 100644
  define Device/linksys_ea6350v3
  	# The Linksys EA6350v3 has a uboot bootloader that does not
  	# support either booting lzma kernel images nor booting UBI
+

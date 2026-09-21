@@ -286,15 +286,8 @@ CONFIG_PACKAGE_kmod-nf-reject6=y
 #     从**固件解包**的实装包清单已确证 kmod-nft-{core,fib,nat,offload,socket,tproxy}
 #     六个全部在固件里（这是最硬的证据，比 .config 更可靠）。
 #
-#   下面这行 `CONFIG_PACKAGE_iptables=y` 是「意图声明」：表示"如果要 iptables，
-#   优先解析成 nft 后端"。在纯 nft 模式下它可能不产生任何实际包，属正常。
-CONFIG_PACKAGE_iptables=y
+#   `iptables` 是虚拟提供者，不写无效的 CONFIG_PACKAGE_iptables=y。
 # CONFIG_PACKAGE_iptables-zz-legacy is not set
-CONFIG_PACKAGE_kmod-ipt-nat=y
-CONFIG_PACKAGE_iptables-mod-conntrack-extra=y
-CONFIG_PACKAGE_iptables-mod-iprange=y
-CONFIG_PACKAGE_iptables-mod-socket=y
-CONFIG_PACKAGE_iptables-mod-tproxy=y
 
 # ---------- IPv6（旁路由要给内网发 RA / 处理 v6 流量） ----------
 CONFIG_PACKAGE_ipv6helper=y
@@ -347,3 +340,4 @@ CONFIG_VERSION_PRODUCT="C526A"
 CONFIG_CCACHE=y
 CONFIG_AUTOREMOVE=n
 CONFIG_DEBUG=n
+

@@ -1,0 +1,51 @@
+#!/bin/sh
+# ============================================================================
+# 99-c526a-lan-address  ——  仅把 LAN 地址烤进固件（最小改动版）
+#
+# 放置位置（仓库）：files/etc/uci-defaults/99-c526a-lan-address
+# 生效方式：OpenWrt 构建时会把检出根目录下的 files/ 覆盖进镜像；
+#           首次启动时 /etc/uci-defaults/* 依次执行一次。
+#
+# 只做三件事：
+#   1) LAN 固定为 192.168.5.2/24，网关 192.168.5.1，DNS 192.168.5.1
+#   2) 关掉本机的 DHCP / RA / NDP —— 必须关：否则它会和主路由在同一网段抢着发地址
+#   3) 从 bdinfo 动态读 MAC 写到 br-lan ——（可选但建议：当前实测 br-lan 是随机 MAC）
+#
+# 其它一切（passwall2 节点、去广告、Tailscale、cron）都不在这里做，等设备能正常
+# 访问后再配。
+# ============================================================================
+
+# ---- 1. LAN 静态地址 ----
+uci set network.lan.proto='static'
+uci set network.lan.ipaddr='192.168.5.2'
+uci set network.lan.netmask='255.255.255.0'
+uci set network.lan.gateway='192.168.5.1'
+uci set network.lan.dns='192.168.5.1'
+uci -q delete network.lan.ip6assign
+
+# ---- 2. 本机不再发地址（关键，避免和主路由冲突）----
+uci set dhcp.lan.ignore='1'
+uci set dhcp.lan.ra='disabled'
+uci set dhcp.lan.ndp='disabled'
+uci set dhcp.lan.dhcpv6='disabled'
+uci set dhcp.wan.ignore='1'
+uci -q set dhcp.odhcpd.maindhcp='0'
+
+# ---- 3.（建议保留）br-lan 的 MAC 从 bdinfo 动态取，避免随机 MAC ----
+MTDBD=$(awk -v pat='"bdinfo"' '$0 ~ pat { gsub(":","",$1); sub("mtd","",$1); print $1; exit }' /proc/mtd)
+if [ -n "$MTDBD" ]; then
+  VFAC=$(dd if=/dev/mtd$MTDBD bs=1 count=8192 2>/dev/null | strings | sed -n 's/.*Vfac_mac *= *//p' | head -n1 | tr -d ' \r\n')
+  if [ -n "$VFAC" ]; then
+    LANDEV=$(uci show network 2>/dev/null | sed -n "s/^network\.\(@device\[[0-9]*\]\)\.name='br-lan'/\1/p" | head -n1)
+    if [ -n "$LANDEV" ]; then
+      uci set network.$LANDEV.macaddr="$VFAC"
+    else
+      uci set network.lan.macaddr="$VFAC"
+    fi
+  fi
+fi
+
+uci commit network
+uci commit dhcp
+
+exit 0

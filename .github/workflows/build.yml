@@ -141,6 +141,12 @@ jobs:
       # 注意：这里必须用 printf 逐行追加，不能用 heredoc。
       # 因为 YAML 块标量 (run: |) 会给每一行加上 10 个空格缩进，
       # heredoc 的结束标记 EOF 也会被缩进，导致 shell 无法识别、内容写错。
+      - name: Bake C526A default config (files/)
+        run: |
+          cp -a "$GITHUB_WORKSPACE/files" openwrt/
+          chmod +x openwrt/files/etc/uci-defaults/* 2>/dev/null || true
+          echo "=== baked files ==="
+          find openwrt/files -type f | head -n 20
       - name: Add PassWall feeds
         run: |
           cd openwrt

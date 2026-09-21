@@ -16,6 +16,9 @@ name: Build C526A (OpenWrt 25.12 + ipqess + PassWall)
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - ci/c526a-verified-ubi-20260921
   # 也允许定时（可选，注释掉避免误触发）
   # schedule:
   #   - cron: '0 18 * * 0'
@@ -95,7 +98,8 @@ jobs:
 
           # ③ 归属校验：确认这个 commit 确实在 openwrt-25.12 分支上
           #    （防止误填成 master 上的 commit —— 那会拿到完全不同的内核）
-          git fetch --depth 1 origin openwrt-25.12
+          # 祖先关系需要完整历史；浅克隆只有两个孤立提交时会误判旧 SHA。
+          git fetch --unshallow origin openwrt-25.12
           if git merge-base --is-ancestor "$OPENWRT_COMMIT" FETCH_HEAD; then
             echo "OK: $OPENWRT_COMMIT 属于 openwrt-25.12"
           else
@@ -452,8 +456,7 @@ jobs:
             CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Haproxy \
             CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy \
             CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy \
-            CONFIG_PACKAGE_iptables-zz-legacy \
-            CONFIG_PACKAGE_iptables-legacy ; do
+            CONFIG_PACKAGE_iptables-zz-legacy ; do
             if grep -q "^${opt}=" .config; then
               sed -i "s|^${opt}=.*|# ${opt} is not set|" .config
             else
@@ -477,7 +480,6 @@ jobs:
             CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy \
             CONFIG_PACKAGE_geoview \
             CONFIG_PACKAGE_iptables-zz-legacy \
-            CONFIG_PACKAGE_iptables-legacy \
             CONFIG_PACKAGE_haproxy ; do
             got=$(grep -E "^${opt}=" .config || echo "  ${opt}  (未定义)")
             echo "  $got"
@@ -548,11 +550,10 @@ jobs:
           echo "  --- （仅供参考）dnsmasq 相关 ---"
           grep -E '^CONFIG_PACKAGE_dnsmasq' .config || echo "    (无)"
           echo "=== ★ 反向断言：legacy provider 不能进 world ==="
-          # 说明：iptables-zz-legacy / iptables-legacy 若被拉成 y，会与
+          # 说明：iptables-zz-legacy 若被拉成 y，会与
           #       iptables-nft 互斥，package/install 报 Error 4（Run #9/#10 死因）。
           #       未定义 与 "is not set" 都算合格。
-          for opt in CONFIG_PACKAGE_iptables-zz-legacy \
-                     CONFIG_PACKAGE_iptables-legacy ; do
+          for opt in CONFIG_PACKAGE_iptables-zz-legacy ; do
             if grep -qx "${opt}=y" .config; then
               echo "  [BAD]  ${opt}=y —— 与 iptables-nft 互斥，会让 package/install 报 Error 4"
               NFAIL=1
@@ -585,8 +586,13 @@ jobs:
             || { echo "!! generic.mk 里没有 Device/hiwifi_c526a"; FAIL=1; }
           echo ""
           echo "=== files-6.12 DTS（补丁新增）==="
-          ls -la target/linux/ipq40xx/files-6.12/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts \
+          DTS=target/linux/ipq40xx/files-6.12/arch/arm/boot/dts/qcom/qcom-ipq4019-c526a.dts
+          ls -la "$DTS" \
             || { echo "!! DTS 未落地"; FAIL=1; }
+          if [ -f "$DTS" ] && ! grep -Eq 'reg = <0x0 0x8000000>;' "$DTS"; then
+            echo "!! C526A DTS 的 ubi 分区不再是完整 128 MiB"
+            FAIL=1
+          fi
           echo ""
           echo "=== ipqess 补丁必须存在（上游 25.12 自带，实测 6 个含 ipqess 名）==="
           if [ ! -d target/linux/ipq40xx/patches-6.12 ]; then
@@ -852,23 +858,17 @@ jobs:
           nf3=$(grep -cE '^CONFIG_PACKAGE_chinadns-ng=y' .config 2>/dev/null || true); nf3=${nf3:-0}
           nf4=$(grep -cE '^CONFIG_PACKAGE_ipt2socks=y' .config 2>/dev/null || true); nf4=${nf4:-0}
           in2=$(grep -cE '^CONFIG_PACKAGE_iptables-zz-legacy=y' .config 2>/dev/null || true); in2=${in2:-0}
-          in3=$(grep -cE '^CONFIG_PACKAGE_iptables-legacy=y' .config 2>/dev/null || true); in3=${in3:-0}
           echo "  kmod-nft-tproxy=y     : $nf1  （必须为 1，Run #12 实证）"
           echo "  kmod-nft-socket=y     : $nf2  （必须为 1，Run #12 实证）"
           echo "  chinadns-ng=y         : $nf3  （必须为 1，Run #12 实证）"
           echo "  ipt2socks=y           : $nf4  （必须为 1，Run #12 实证）"
           echo "  iptables-zz-legacy=y  : $in2  （必须为 0）"
-          echo "  iptables-legacy=y     : $in3  （必须为 0）"
           if [ "$nf1" -ne 1 ] || [ "$nf2" -ne 1 ] || [ "$nf3" -ne 1 ] || [ "$nf4" -ne 1 ]; then
             echo "  !! 实证必需的代理核心缺失 —— 说明本轮 config 改动把它们弄丢了"
             FAIL=1
           fi
           if [ "$in2" -ne 0 ]; then
             echo "  !! iptables-zz-legacy 与 iptables-nft 互斥，会让 package/install 报 Error 4"
-            FAIL=1
-          fi
-          if [ "$in3" -ne 0 ]; then
-            echo "  !! iptables-legacy 与 iptables-nft 互斥"
             FAIL=1
           fi
           echo "  --- 参考（不判定）：.config 里 iptables / nftables 相关行 ---"
@@ -953,6 +953,16 @@ jobs:
             grep -E '^CONFIG_TARGET_ipq40xx_generic_DEVICE_' .config || echo "    (一个都没有)"
             FAIL=1
           fi
+          # 不能只相信手工改过的 .config；编译阶段也应保留该设备。
+          if [ -f bin/targets/ipq40xx/generic/config.buildinfo ]; then
+            grep -qx "$DEV_OPT" bin/targets/ipq40xx/generic/config.buildinfo || {
+              echo "  [MISS] config.buildinfo 未记录 C526A 设备项"
+              FAIL=1
+            }
+          else
+            echo "  [MISS] config.buildinfo 不存在"
+            FAIL=1
+          fi
           echo ""
 
           echo "=== ② bin/targets/ipq40xx/generic 下的 C526A 镜像 ==="
@@ -969,11 +979,12 @@ jobs:
             FAIL=1
           fi
 
-          # factory.ubi：首次刷机用（从原厂/其他固件进 U-Boot 恢复页刷）
+          # factory.ubi：构建产物；实际写入路径仍需核对设备的 U-Boot 与分区布局。
           FU=$(find bin/targets/ipq40xx/generic -maxdepth 1 -type f \
                  -name '*hiwifi_c526a*squashfs-factory.ubi' -print -quit 2>/dev/null || true)
           if [ -n "$FU" ] && [ -s "$FU" ]; then
             echo "  [OK] C526A factory.ubi  = $FU  ($(wc -c < "$FU") B)"
+            python3 "$GITHUB_WORKSPACE/scripts/verify_c526a_ubi.py" "$FU" || FAIL=1
           else
             echo "  [MISS] 未产出 C526A factory.ubi"
             FAIL=1
@@ -989,10 +1000,52 @@ jobs:
             echo "         （initramfs 是刷机救援路径，缺了风险高；记为失败）"
             FAIL=1
           fi
+          echo "=== profiles.json 设备元数据 ==="
+          PJ=bin/targets/ipq40xx/generic/profiles.json
+          if [ ! -s "$PJ" ] || ! python3 -c '
+          import json, sys
+          data = json.load(open(sys.argv[1], encoding="utf-8"))
+          profile = data["profiles"]["hiwifi_c526a"]
+          assert "hiwifi,c526a" in profile["supported_devices"]
+          images = {item["name"] for item in profile["images"]}
+          assert any(name.endswith("-initramfs-zImage.itb") for name in images)
+          assert any(name.endswith("-squashfs-factory.ubi") for name in images)
+          assert any(name.endswith("-squashfs-sysupgrade.bin") for name in images)
+          ' "$PJ"; then
+            echo "  [MISS] 设备标识或三种镜像元数据不符"
+            FAIL=1
+          fi
+          echo "=== ③ C526A 实装包清单 ==="
+          # OpenWrt Image/Manifest 以 IMG_PREFIX 命名，通常不带设备名。
+          MF=$(find bin/targets/ipq40xx/generic -maxdepth 1 -type f \
+                 -name '*.manifest' -print -quit 2>/dev/null || true)
+          if [ -z "$MF" ] || [ ! -s "$MF" ]; then
+            echo "  [MISS] C526A manifest 缺失，无法证明包已进入 rootfs"
+            FAIL=1
+          else
+            echo "  manifest = $MF"
+            for pkg in luci-app-passwall luci-app-passwall2 firewall4 \
+                       xray-core sing-box chinadns-ng ipt2socks \
+                       kmod-nft-socket kmod-nft-tproxy; do
+              if awk -v p="$pkg" '$1 == p { found=1 } END { exit !found }' "$MF"; then
+                echo "  [OK]   $pkg"
+              else
+                echo "  [MISS] $pkg 未进入 rootfs"
+                FAIL=1
+              fi
+            done
+            # nftables 是变体包基名；只报告实际 provider，不猜测变体名。
+            echo "  --- 参考（不判定）manifest 里的 nftables 行 ---"
+            awk '$1 ~ /^nftables/ { print "    " $0 }' "$MF" || true
+            if awk '$1 == "iptables-zz-legacy" { found=1 } END { exit !found }' "$MF"; then
+              echo "  [BAD]  iptables-zz-legacy 进入 rootfs"
+              FAIL=1
+            fi
+          fi
           echo ""
 
           # 顺带报一下同 target 下有没有别的机器的产物（用来发现"编错设备"）
-          echo "=== ③ 同 target 下的其它产物（仅供核对，不影响判定）==="
+          echo "=== ④ 同 target 下的其它产物（仅供核对，不影响判定）==="
           find bin/targets/ipq40xx/generic -maxdepth 1 -type f \
             \( -name '*.bin' -o -name '*.ubi' -o -name '*.itb' \) 2>/dev/null \
             | grep -v 'hiwifi_c526a' | head -10 || echo "  (无其它设备产物 —— 符合预期)"
@@ -1007,21 +1060,28 @@ jobs:
           echo "=== 产物断言通过：C526A 三种镜像齐全 ==="
 
       - name: Prepare artifacts
-        if: always()
         run: |
           mkdir -p output
           cd openwrt
           find bin/targets/ipq40xx -type f \( -name "*.bin" -o -name "*.ubi" -o -name "*.itb" \
-            -o -name "*metadata*" -o -name "profiles.json" -o -name "*.buildinfo" \) \
-            -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
-          # 顺便把编译出的 passwall ipk 也带上（以后想单独装也方便）
-          find bin/packages -type f -name "*passwall*" \
-            -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
+            -o -name "*metadata*" -o -name "profiles.json" -o -name "*.buildinfo" \
+            -o -name "*.manifest" \) \
+            -exec cp {} "$GITHUB_WORKSPACE/output/" \;
+          # 25.12 使用 apk 包；保留独立安装包供核对。
+          find bin/packages -type f -name "*passwall*.apk" \
+            -exec cp {} "$GITHUB_WORKSPACE/output/" \;
+          for pattern in '*hiwifi_c526a*sysupgrade.bin' '*hiwifi_c526a*factory.ubi' \
+                         '*hiwifi_c526a*initramfs*' '*.manifest' 'config.buildinfo' \
+                         'profiles.json'; do
+            compgen -G "$GITHUB_WORKSPACE/output/$pattern" >/dev/null || {
+              echo "!! 上传目录缺少 $pattern"
+              exit 1
+            }
+          done
           ls -la "$GITHUB_WORKSPACE/output/"
           cat bin/targets/ipq40xx/generic/*.buildinfo 2>/dev/null || true
 
       - name: Upload firmware
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: c526a-25.12-ipqess-passwall-firmware
@@ -1029,3 +1089,4 @@ jobs:
           # ★ 空目录直接失败，不再上传空壳
           if-no-files-found: error
           retention-days: 30
+

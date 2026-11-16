@@ -61,16 +61,20 @@ jobs:
           #
           # 因此改为：先 clone 分支，再 checkout --detach 到已验证的 commit。
           #
-          # 9facdff6fb001b7a4e8cea395b89278fd49ca92f
-          #   = openwrt-25.12 分支 HEAD，2026-09-01，Linux 6.12.108
-          #   = Run #12 实际使用、并【已成功产出可用固件】的那一个提交
-          #     （固件 version.buildinfo 里的 `r0-9facdff` 即此提交的短 SHA）
+          # 64900e756efa667774214f9c6b17c113222e01f7
+          #   = OpenWrt v25.12.6 官方发布 tag 指向的 commit（2026-10-18，Linux 6.12.112）
+          #   （查法：tag v25.12.6 → annotated tag 22dd0e28 → commit 64900e75，PGP 已验证）
+          #   = 含 uhttpd 5 个未授权漏洞、Mbed TLS 3.6.7、OpenSSL 3.5.9、kernel .95~.112 修复
+          #
+          # 上一版 9facdff6 = 2026-09-01 的 openwrt-25.12 HEAD（Linux 6.12.108）。
+          # 升级前已实测：0001 补丁的 7 个文件在 64900e75 上 git apply --check 全部通过；
+          # ipqess 补丁数仍为 6、essedma 仍为 0，与下面 Verify 的阈值一致。
           #
           # 升级方式：想换新版本时，把下面的 SHA 换成目标 commit 的完整 SHA
-          #   （查法：GET https://api.github.com/repos/openwrt/openwrt/branches/openwrt-25.12
-          #           → commit.sha）
+          #   （查法：GET https://api.github.com/repos/openwrt/openwrt/git/refs/tags/v25.12.x
+          #           → object.sha 是 tag 对象，再查 git/tags/<sha> → object.sha 才是 commit）
           #   换完必须重跑一次完整验证，因为补丁与阈值都是针对旧 commit 校过的。
-          OPENWRT_COMMIT: 9facdff6fb001b7a4e8cea395b89278fd49ca92f
+          OPENWRT_COMMIT: 64900e756efa667774214f9c6b17c113222e01f7
         run: |
           set -e
           echo "目标 commit = $OPENWRT_COMMIT"
@@ -689,7 +693,7 @@ jobs:
           # ⚠️ 原来这里是 if/else 只打印 [OK]/[MISS]，**不设 FAIL** →
           #    xray-core / sing-box / chinadns-ng 全缺也能全绿通过。已改为计入 FAIL。
           MISSING=""
-          for p in xray-core sing-box chinadns-ng dns2socks microsocks ipt2socks \
+          for p in xray-core chinadns-ng dns2socks microsocks ipt2socks \
                    shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir \
                    simple-obfs-client v2ray-geoip v2ray-geosite tcping lyaml; do
             if grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
@@ -1031,8 +1035,9 @@ jobs:
           else
             echo "  manifest = $MF"
             for pkg in luci-app-passwall luci-app-passwall2 firewall4 \
-                       xray-core sing-box chinadns-ng ipt2socks \
-                       kmod-nft-socket kmod-nft-tproxy; do
+                       xray-core chinadns-ng ipt2socks \
+                       kmod-nft-socket kmod-nft-tproxy \
+                       kmod-usb-storage kmod-scsi-core kmod-fs-ext4 block-mount; do
               if awk -v p="$pkg" '$1 == p { found=1 } END { exit !found }' "$MF"; then
                 echo "  [OK]   $pkg"
               else

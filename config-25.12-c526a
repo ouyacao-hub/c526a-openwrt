@@ -144,7 +144,8 @@ CONFIG_PACKAGE_luci-i18n-passwall2-zh-cn=y
 
 # 基础内核：arm(armv7) 不在 _Basic_Core_All 的 default 里，必须显式指定
 CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_Xray=y
-CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_SingBox=y
+# sing-box 内核关闭（与上面 CONFIG_PACKAGE_sing-box=n 配套）：只保留 Xray 内核
+CONFIG_PACKAGE_luci-app-passwall2_Basic_Core_SingBox=n
 
 # 透明代理栈同 v1：只留 Nftables 版（Iptables 版会把互斥 provider 一起拉进来）
 # CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy is not set
@@ -167,7 +168,11 @@ CONFIG_PACKAGE_luci-app-passwall2_INCLUDE_Haproxy=n
 #    实测经验：全量编译 + 5 个 Go 包 + 1 个 Rust 包，350 分钟大概率超时。
 #    → 因此只保留"能力不可替代"的包，砍掉重复功能项（见下方注释）。
 CONFIG_PACKAGE_xray-core=y
-CONFIG_PACKAGE_sing-box=y
+# ★ sing-box 关闭（2026-11-16）：实测 /usr/bin/sing-box 占 53MB，而全部节点都是 Xray 类型，
+#   从未参与任何流量。128MB NAND 上这 53MB 是纯浪费（且 apk del 删不掉——它在只读镜像里）。
+#   代价：将来若要用 sing-box 节点，需重新编译带回来。当前所有订阅节点均为 vless/xray，不需要。
+#   ⚠️ 同时要把 passwall2 的 Basic_Core_SingBox 关掉，否则依赖会把它拉回来。
+CONFIG_PACKAGE_sing-box=n
 CONFIG_PACKAGE_chinadns-ng=y
 CONFIG_PACKAGE_dns2socks=y
 CONFIG_PACKAGE_microsocks=y
@@ -326,6 +331,23 @@ CONFIG_PACKAGE_uboot-envtools=y
 # ---------- 系统监控 ----------
 CONFIG_PACKAGE_luci-app-commands=y
 
+# ---------- USB 存储（2026-11-16 新增）----------
+# 背景：C526A 的 DTS 里有 usb2@60f8800 / usb3@8af8800，dwc3 + xhci 驱动本来就加载了，
+#       但镜像里【一个存储包都没有】→ 插 U 盘认不到、无法挂载、无法做 extroot。
+#       且这些 kmod 与内核版本强绑定（6.12.108 的 kmod 在仓库里已随快照滚动消失，装不回来），
+#       只能在编译时编进去。
+# 用途：U 盘格 ext4 → block-mount 配 extroot → overlay 从 75MB 扩到 U 盘容量，
+#       以后装 sing-box/大包不再受 35MB 剩余空间限制。
+CONFIG_PACKAGE_kmod-usb-storage=y
+CONFIG_PACKAGE_kmod-usb-storage-uas=y
+CONFIG_PACKAGE_kmod-usb-storage-extras=y
+CONFIG_PACKAGE_kmod-scsi-core=y
+CONFIG_PACKAGE_kmod-fs-ext4=y
+CONFIG_PACKAGE_kmod-fs-vfat=y
+CONFIG_PACKAGE_kmod-nls-cp437=y
+CONFIG_PACKAGE_kmod-nls-utf8=y
+CONFIG_PACKAGE_block-mount=y
+
 # ---------- Wi-Fi 全关（旁路由只走有线，与已执行的驱动卸载实验一致） ----------
 # 不显式写 =n，让 defconfig 按 target 默认走。
 
@@ -340,4 +362,3 @@ CONFIG_VERSION_PRODUCT="C526A"
 CONFIG_CCACHE=y
 CONFIG_AUTOREMOVE=n
 CONFIG_DEBUG=n
-

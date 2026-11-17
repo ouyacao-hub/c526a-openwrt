@@ -699,14 +699,25 @@ jobs:
           # ⚠️ 原来这里是 if/else 只打印 [OK]/[MISS]，**不设 FAIL** →
           #    xray-core / sing-box / chinadns-ng 全缺也能全绿通过。已改为计入 FAIL。
           MISSING=""
-          for p in xray-core chinadns-ng dns2socks microsocks ipt2socks \
-                   shadowsocksr-libev-ssr-local shadowsocksr-libev-ssr-redir \
-                   simple-obfs-client v2ray-geoip v2ray-geosite tcping lyaml; do
+          # 2026-11-17：拆成"硬必需"与"仅报告"两组。
+          # 原因：v1(luci-app-passwall) 关闭后，ssr-libev / simple-obfs / tcping / lyaml
+          # 这些原本由 v1 select 的包可能不再被拉入。它们对 v2 + Xray 节点并非必需
+          # （本机全部节点为 VLESS/Xray），硬断言会误杀。
+          for p in xray-core chinadns-ng ipt2socks v2ray-geoip v2ray-geosite; do
             if grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
               echo "  [OK]   $p"
             else
               echo "  [MISS] $p   —— 必需核心缺失"
               MISSING="$MISSING $p"
+            fi
+          done
+          echo "  --- 以下为可选项（缺失仅提示，不判定）---"
+          for p in dns2socks microsocks shadowsocksr-libev-ssr-local \
+                   shadowsocksr-libev-ssr-redir simple-obfs-client tcping lyaml; do
+            if grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
+              echo "  [有]   $p"
+            else
+              echo "  [无]   $p  （v1 关闭后的正常现象）"
             fi
           done
           if [ -n "$MISSING" ]; then
@@ -893,12 +904,18 @@ jobs:
           echo "=== ★★ Nftables 透明代理必须启用（firewall4 的正解）★★ ==="
           # 外部审查指出：收了 Iptables_Transparent_Proxy 就必须开 Nftables 版，
           # 否则面板里连透明代理的选项都没有（固件"能跑但没法用"）。
-          nf1=$(grep -cE '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y' .config 2>/dev/null || true); nf1=${nf1:-0}
           nf2=$(grep -cE '^CONFIG_PACKAGE_luci-app-passwall2_Nftables_Transparent_Proxy=y' .config 2>/dev/null || true); nf2=${nf2:-0}
-          echo "  passwall_Nftables_Transparent_Proxy  = $nf1（必须为 1）"
+          v1on=$(grep -cxE 'CONFIG_PACKAGE_luci-app-passwall=y' .config 2>/dev/null || true); v1on=${v1on:-0}
+          echo "  passwall(v1) 启用状态 = $v1on（0 = 已关闭 → 不再检查它的透明代理选项）"
           echo "  passwall2_Nftables_Transparent_Proxy = $nf2（必须为 1）"
-          [ "$nf1" -eq 1 ] || { echo "  !! v1 的 Nftables 透明代理未启用 → 面板无透明代理选项"; FAIL=1; }
           [ "$nf2" -eq 1 ] || { echo "  !! v2 的 Nftables 透明代理未启用 → 面板无透明代理选项"; FAIL=1; }
+          if [ "$v1on" -eq 1 ]; then
+            nf1=$(grep -cE '^CONFIG_PACKAGE_luci-app-passwall_Nftables_Transparent_Proxy=y' .config 2>/dev/null || true); nf1=${nf1:-0}
+            echo "  passwall_Nftables_Transparent_Proxy  = $nf1（v1 已启用，必须为 1）"
+            [ "$nf1" -eq 1 ] || { echo "  !! v1 的 Nftables 透明代理未启用 → 面板无透明代理选项"; FAIL=1; }
+          else
+            echo "  [SKIP] v1 已关闭，跳过其 Nftables 透明代理检查"
+          fi
           # 反向：Iptables 版必须关（它会 select iptables-zz-legacy，与 nft 互斥）
           for opt in CONFIG_PACKAGE_luci-app-passwall_Iptables_Transparent_Proxy \
                      CONFIG_PACKAGE_luci-app-passwall2_Iptables_Transparent_Proxy ; do

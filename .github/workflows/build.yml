@@ -674,15 +674,21 @@ jobs:
           #         连 i18n 包都算命中，**证明不了两个根包都为 y**
           #    ⇒ 于是「v1 在、v2 没了」或「v2 在、v1 没了」都能全绿通过。
           #      而用户硬需求就是 v1+v2 同时内置（SSR 只在 v1）→ 必须分别断言。
-          for p in luci-app-passwall luci-app-passwall2; do
-            if grep -qx "CONFIG_PACKAGE_${p}=y" .config; then
-              echo "  [OK]   CONFIG_PACKAGE_${p}=y"
-            else
-              echo "  [MISS] CONFIG_PACKAGE_${p}  —— 必须为 y，否则缺一版 PassWall"
-              grep -E "^CONFIG_PACKAGE_${p}" .config || echo "         (config 里完全没有该项)"
-              FAIL=1
-            fi
-          done
+          # 2026-11-17 起：只要求 v2。v1 已明确关闭（实测 0 节点、从未启用；
+          # 且它的 INCLUDE_SingBox 会用 select 把 53.9MB 的 sing-box 强行拉回镜像）。
+          if grep -qx "CONFIG_PACKAGE_luci-app-passwall2=y" .config; then
+            echo "  [OK]   CONFIG_PACKAGE_luci-app-passwall2=y"
+          else
+            echo "  [MISS] CONFIG_PACKAGE_luci-app-passwall2  —— 必须为 y（本机唯一在用的版本）"
+            grep -E "^CONFIG_PACKAGE_luci-app-passwall2" .config || echo "         (config 里完全没有该项)"
+            FAIL=1
+          fi
+          if grep -qx "CONFIG_PACKAGE_luci-app-passwall=y" .config; then
+            echo "  !! CONFIG_PACKAGE_luci-app-passwall=y —— 不应存在（v1 已关闭）"
+            FAIL=1
+          else
+            echo "  [OK]   luci-app-passwall (v1) 已关闭"
+          fi
           echo "  --- i18n 包（仅展示，不作为判据）---"
           grep -E '^CONFIG_PACKAGE_luci-i18n-passwall' .config || echo "    (无)"
           echo ""
@@ -1034,7 +1040,7 @@ jobs:
             FAIL=1
           else
             echo "  manifest = $MF"
-            for pkg in luci-app-passwall luci-app-passwall2 firewall4 \
+            for pkg in luci-app-passwall2 firewall4 \
                        xray-core chinadns-ng ipt2socks \
                        kmod-nft-socket kmod-nft-tproxy \
                        kmod-usb-storage kmod-scsi-core kmod-fs-ext4 block-mount; do
@@ -1043,6 +1049,16 @@ jobs:
               else
                 echo "  [MISS] $pkg 未进入 rootfs"
                 FAIL=1
+              fi
+            done
+            # ★ 反向断言（2026-11-17）：sing-box 与 PassWall v1 必须【不在】rootfs
+            #   验证"关掉 v1 → 其 INCLUDE_SingBox 的 select 失效 → 53.9MB 一并消失"这条链。
+            for badpkg in sing-box luci-app-passwall; do
+              if awk -v p="$badpkg" '$1 == p { found=1 } END { exit !found }' "$MF"; then
+                echo "  [BAD]  $badpkg 仍在 rootfs（应已移除）"
+                FAIL=1
+              else
+                echo "  [OK]   $badpkg 已不在 rootfs"
               fi
             done
             # nftables 是变体包基名；只报告实际 provider，不猜测变体名。

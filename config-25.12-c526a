@@ -68,12 +68,19 @@ CONFIG_PACKAGE_luci-i18n-opkg-zh-cn=y
 # ============================================================================
 
 # ---------- PassWall v1（含 SSR-plus） ----------
-CONFIG_PACKAGE_luci-app-passwall=y
+# ★ PassWall v1 关闭（2026-11-17）：实测 0 个节点、服务从未启用，纯占 2.3MB 镜像。
+#   更重要的是：v1 的 INCLUDE_SingBox 用 select 强制把 53.9MB 的 sing-box 拉进镜像
+#   （2026-11-16 的 Run #19 就是这样，即使把 CONFIG_PACKAGE_sing-box 设成 n 也没用，
+#    因为 OpenWrt 的 select 优先级高于 =n）。
+#   关掉 v1 → 它的 selects 全部失效 → sing-box 一并消失，共省约 56MB。
+#   v2（luci-app-passwall2）是本机实际在用的，全部 26 个节点和四组分流都在 v2 上。
+CONFIG_PACKAGE_luci-app-passwall=n
 CONFIG_PACKAGE_luci-i18n-passwall-zh-cn=y
 
 # 基础内核：Xray + Sing-Box 都要
 CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Xray=y
-CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=y
+# v1 已整体关闭，其子选项不再生效；显式写 n 是为了防止将来误改 v1 时把 sing-box 带回来
+CONFIG_PACKAGE_luci-app-passwall_INCLUDE_SingBox=n
 CONFIG_PACKAGE_luci-app-passwall_INCLUDE_V2ray_Geodata=y
 # ★ Geoview 必须为 n：其 go.mod 要求 go >= 1.25.0（25.12 的 golang 是 1.26，能编，但它非必需，仍关掉省时间）
 CONFIG_PACKAGE_luci-app-passwall_INCLUDE_Geoview=n
